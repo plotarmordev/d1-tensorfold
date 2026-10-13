@@ -1,5 +1,18 @@
 # Changelog
 
+## Audited native-BF16 cutover
+
+- Replaced the earlier packed/quantized family with the measured native-checkpoint BF16 implementation:
+  serialized requests, within-request shared trunks, sparse System One heads, fused kernels and exact-shape graphs.
+- Included HTTP `TCP_NODELAY`, eliminating the measured persistent-connection delayed-ACK stall.
+- Removed active FP8/INT4 and padded-graph paths. Historical results remain explicitly labeled pre-audit.
+- Added byte verification of all eleven patched runtime files during image build and included the manifest in
+  the image-input hash. No development source bind mount is required.
+- Added explicit serving context and fail-before-replacement validation, native TF32 override settings,
+  and the real-checkpoint repeated/concurrent/image qualifier.
+- Retained all final timing waves as neutralized, hash-pinned derivatives, memory snapshots and provenance.
+  Overall performance qualification remains INCONCLUSIVE; warm means, cold costs and open gates remain distinct.
+
 ## 2026-10-13
 
 - Added single-GB10 deployment of LiquidAI/d1-3B through TensorFold's Python 0.6 engine, as three source patches.

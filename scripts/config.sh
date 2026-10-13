@@ -4,7 +4,7 @@ RECIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 declare -A _caller=()
 for _key in MODEL_REPO MODEL_REVISION GGUF_REPO GGUF_REVISION TF_REPO TF_COMMIT LLAMACPP_REPO LLAMACPP_COMMIT \
   BASE_IMAGE CUDA_ARCH IMAGE_EXTRAS DATA_DIR MODEL_DIR GGUF_DIR CACHE_DIR PRECISION HOST PORT SERVED_NAME \
-  TOKEN_BUDGET CUDA_GRAPHS CONTAINER_NAME LLAMACPP_PORT LLAMACPP_CONTAINER LLAMACPP_IMAGE IMAGE MIN_FREE_GIB; do
+  CONTEXT TOKEN_BUDGET CUDA_GRAPHS CONTAINER_NAME LLAMACPP_PORT LLAMACPP_CONTAINER LLAMACPP_IMAGE IMAGE MIN_FREE_GIB; do
   if [[ -v $_key ]]; then _caller[$_key]="${!_key}"; fi
 done
 [[ ! -f "$RECIPE_DIR/scripts/local.sh" ]] || source "$RECIPE_DIR/scripts/local.sh"
@@ -28,10 +28,11 @@ DATA_DIR="$(realpath -m "${DATA_DIR:-$RECIPE_DIR/data}")"
 MODEL_DIR="$(realpath -m "${MODEL_DIR:-$DATA_DIR/models/d1-3B}")"
 GGUF_DIR="$(realpath -m "${GGUF_DIR:-$DATA_DIR/models/d1-3B-GGUF}")"
 CACHE_DIR="$(realpath -m "${CACHE_DIR:-$DATA_DIR/cache}")"
-PRECISION="${PRECISION:-bf16}" # bf16 | fp8 | int4
+PRECISION="${PRECISION:-bf16}" # native checkpoint BF16 only
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
 SERVED_NAME="${SERVED_NAME:-d1-3B}"
+CONTEXT="${CONTEXT:-32768}"
 TOKEN_BUDGET="${TOKEN_BUDGET:-65536}"
 CUDA_GRAPHS="${CUDA_GRAPHS:-1}"
 MIN_FREE_GIB="${MIN_FREE_GIB:-56}" # launch floor for shared CPU/GPU memory; not a runtime allocation cap
@@ -41,7 +42,8 @@ LLAMACPP_CONTAINER="${LLAMACPP_CONTAINER:-d1-llamacpp}"
 
 image_hash() {
   { printf '%s\n' "$TF_REPO" "$TF_COMMIT" "$BASE_IMAGE" "$IMAGE_EXTRAS";
-    cat "$RECIPE_DIR/Dockerfile" "$RECIPE_DIR"/patches/*.patch; } | sha256sum | cut -c1-12
+    cat "$RECIPE_DIR/Dockerfile" "$RECIPE_DIR"/patches/*.patch "$RECIPE_DIR/checksums/tensorfold-audited.sha256";
+  } | sha256sum | cut -c1-12
 }
 llamacpp_hash() {
   { printf '%s\n' "$LLAMACPP_REPO" "$LLAMACPP_COMMIT" "$BASE_IMAGE" "$CUDA_ARCH";
@@ -52,10 +54,11 @@ LLAMACPP_IMAGE="${LLAMACPP_IMAGE:-d1-llamacpp:$(llamacpp_hash)}"
 log() { printf '[d1-tensorfold] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 validate() {
-  case "$PRECISION" in bf16|fp8|int4) ;; *) die "PRECISION: choose bf16, fp8 or int4" ;; esac
+  [[ "$PRECISION" == bf16 ]] || die "PRECISION: this audited recipe supports native bf16 only"
   for value in "$PORT" "$LLAMACPP_PORT"; do
     [[ "$value" =~ ^[1-9][0-9]{0,4}$ && "$value" -le 65535 ]] || die "invalid port: $value"
   done
+  [[ "$CONTEXT" =~ ^[1-9][0-9]{0,4}$ && "$CONTEXT" -le 32768 ]] || die "CONTEXT: 1 through 32768"
   [[ "$TOKEN_BUDGET" =~ ^[1-9][0-9]{0,6}$ && "$TOKEN_BUDGET" -ge 4096 && "$TOKEN_BUDGET" -le 65536 ]] \
     || die "TOKEN_BUDGET: 4096 through 65536"
   [[ "$MIN_FREE_GIB" =~ ^[1-9][0-9]{0,3}$ ]] || die "MIN_FREE_GIB must be positive"

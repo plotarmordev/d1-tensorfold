@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The README's head-to-head tables from a results directory: each pair at the same weight width.
+"""Historical pre-audit tables from a results directory: each pair at the same weight width.
 
     python3 bench/report.py results
 
@@ -41,6 +41,8 @@ def load(d: Path, label: str):
 def main() -> None:
     d = Path(sys.argv[1] if len(sys.argv) > 1 else "results")
     ref = json.loads((d / "reference.json").read_text())
+    print("# Historical pre-audit implementation\n")
+    print("These results do not describe the current native-BF16 engine. FP8/INT4 are no longer supported.\n")
     for base, ours, title in PAIRS:
         a, b = load(d, base), load(d, ours)
         if a is None or b is None:

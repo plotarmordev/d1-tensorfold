@@ -1,6 +1,6 @@
 # Copy to scripts/local.sh (git-ignored) and keep only the lines you change. The environment still wins.
 
-# PRECISION=fp8                    # bf16 | fp8 | int4
+# CONTEXT=4096                     # 1–32768; performance and memory snapshots used 4096
 # HOST=0.0.0.0                     # listen on every interface (the default is this machine only)
 # PORT=8080
 # DATA_DIR=/srv/d1                 # models and kernel caches

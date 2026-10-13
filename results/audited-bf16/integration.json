@@ -1,0 +1,57 @@
+{
+  "image": "sha256:359f54dea5af4e7f835f7ebb56aadc2578d3722332f6592b34236737c814202e",
+  "source_files_verified_during_build": 11,
+  "qualification": {
+    "requests": 20,
+    "failures": [],
+    "graphs": {
+      "resident": 5,
+      "bytes": 58180608,
+      "budget_bytes": 2147483648,
+      "limit": 8,
+      "promote": 2,
+      "captures": 5,
+      "replays": 15,
+      "eager": 5,
+      "evictions": 0
+    },
+    "includes": [
+      "noul",
+      "score",
+      "choice",
+      "multiple questions",
+      "generated blue image"
+    ]
+  },
+  "launcher_smoke": {
+    "context": 4096,
+    "persistent_connection_requests": 4,
+    "concurrent_clients": 16,
+    "all_responses_equal": true,
+    "output_tokens": 0,
+    "oversized_request_status": 400,
+    "generation_status": 400,
+    "invalid_settings_preserved_running_server": true
+  },
+  "unit_tests": {
+    "passed": 4,
+    "command": "python3 -m unittest discover -s tests -v"
+  },
+  "shell_syntax": "passed for start, stop, config, prepare, bench and historical baseline scripts",
+  "whitespace_note": "Non-patch diff check passed. Unified-diff artifacts contain required space-prefixed empty context lines; their application and resulting runtime bytes were verified during build.",
+  "runtime": "CUDA 13.3 compatibility driver 610.43.02, kernel 580.173.02; NGC 26.07, PyTorch 2.13.0a0+9186a08",
+  "source_artifact_sha256": {
+    "qualification.json": "92afe1c644f1f7c2bdb21c5bb36be5571a02c463c8a100d3dd630e5c2a2fe6be",
+    "qualification.log": "c0e40f919983d9bb8ee1634ad6a673adefd0fd6ac09728aad9984dd168ffca1c",
+    "http-smoke.json": "7bb3924d0c4e7c1be9e2a6ab3bd206133ab176654b174ff2d65c129024299250",
+    "start.log": "0733bc981e482b7131d1b067b2ec92b9910fec29d19573f6b150a4ceb4e63b91",
+    "server.log": "65a37165fb11ccd46b9de2e3205d9cb3802e805114d18ae363fde0743425398b"
+  },
+  "temporary_smoke_sha256": "82a473ce02a4b5389f6203dbbd1f2848949682fedf73ba88ac09b54f043ff1da",
+  "gaps": [
+    "These integration checks do not rerun the performance comparison.",
+    "No full-context peak-memory qualification.",
+    "No hosted CI workflows are configured.",
+    "No full upstream test suite was rerun for this packaging-only cutover."
+  ]
+}

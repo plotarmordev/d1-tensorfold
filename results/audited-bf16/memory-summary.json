@@ -1,0 +1,15 @@
+{
+  "scope": "Unified-memory snapshots, not peaks; system delta approximate on shared host; context 4096; GPU allocation and RSS are components, not additions to system delta",
+  "measurements": {
+    "ready": {
+      "cuda_GiB": 6.052734375,
+      "RSS_GiB": 1.716644287109375,
+      "system_delta_GiB": 8.93996810913086
+    },
+    "after_workloads": {
+      "cuda_GiB": 12.9638671875,
+      "RSS_GiB": 2.554149627685547,
+      "system_delta_GiB": 16.69261932373047
+    }
+  }
+}

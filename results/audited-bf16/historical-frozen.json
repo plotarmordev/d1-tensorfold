@@ -1,0 +1,19 @@
+{
+  "checksums/d1-3B-GGUF.sha256": "fa6c5699a78b6104e27f5ce74587436700663624ca095dfb6b3ec9fe5c9fcb78",
+  "checksums/d1-3B.sha256": "ad408b4abb8ef60ca00191fa972bdaec193da50e2769c39b3ef0b5c59f4865d4",
+  "results/environment.json": "279f43fd9b97dd108f19a0d685af88554c6da623d3f9bd2e70280cbc48d4798c",
+  "results/example-response.json": "c06c32b9055a3dbb1ce1070d9b2780e1e465728ac081fdd98046b531d932c922",
+  "results/llamacpp-BF16.json": "9fde2cebb09185e148a9c30b8419ccb5e5148aa5545a34bf56887485f7e48e42",
+  "results/llamacpp-Q4_K_M.json": "1a14a1f9fc4f96d52ebfb5358c077f575e8015c19b4183177d35abdadcb2159a",
+  "results/llamacpp-Q8_0.json": "906b19ba313f6b900eed41991f8620b04ebf86c1ee64c4f2e2d8507da416b9e8",
+  "results/parity-llamacpp-BF16.json": "7347f4bf7bcfd6ebaa98a5856590a874b1d31071e064e5c25deb81b7482d9164",
+  "results/parity-llamacpp-Q4_K_M.json": "28bf0d3e08cdae9714a51f029cce2839c9aa8aaaa6feeb79059ccff9b740f703",
+  "results/parity-llamacpp-Q8_0.json": "99fb0b627a1df8a86e664f68076de0fa659c1ca0cb72eaeb527b658215e832e2",
+  "results/parity-tensorfold-bf16.json": "fb261dff20d9bbafc143cd6ce6badf4f9cb20ff7f9d8f8c584abca1f2ecf9828",
+  "results/parity-tensorfold-fp8.json": "ff2bb62be545be3b1a500a37f0a2c21dcca1f1104aef532fa7936d325dd3a9e4",
+  "results/parity-tensorfold-int4.json": "7d0e445935ea6ded5195f200ae5323674d3ad5d00fc786597d6b312b486788a9",
+  "results/reference.json": "5e66260e14cf9048f969a9ebf45a8a3ba04e50758951033438ef021836932fcf",
+  "results/tensorfold-bf16.json": "9fa3aed02784b036e3985c6d47af7e93a418127e40af0365c410f26292ddff90",
+  "results/tensorfold-fp8.json": "f146e1abe1cdd9ed3e0685f405635b25fd20a206aa2f264131aa2a1834bd0c28",
+  "results/tensorfold-int4.json": "d717f5e04ee6f4edcfa828a3ab8ae8c080a1e41480a0b8382af8d54b970905da"
+}

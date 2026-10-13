@@ -9,8 +9,10 @@ ARG IMAGE_EXTRAS
 RUN test -n "${TF_COMMIT}" && \
     pip install --no-cache-dir "tensorfold @ git+${TF_REPO}@${TF_COMMIT}" ${IMAGE_EXTRAS} && tensorfold --version
 COPY patches /opt/d1-patches
+COPY checksums/tensorfold-audited.sha256 /opt/d1-source.sha256
 RUN cd "$(python -c 'import os, tensorfold; print(os.path.dirname(os.path.dirname(tensorfold.__file__)))')" && \
     for p in /opt/d1-patches/*.patch; do echo "applying $p"; patch -p1 --forward < "$p" || exit 1; done && \
+    sha256sum --strict -c /opt/d1-source.sha256 && \
     python -c "import tensorfold.families.lfm2.cuda.engine, tensorfold.families.lfm2.cuda.app, tensorfold.cuda.server"
 ARG IMAGE_HASH
 LABEL d1.image-hash=${IMAGE_HASH}

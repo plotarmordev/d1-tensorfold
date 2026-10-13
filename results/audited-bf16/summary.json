@@ -1,0 +1,64 @@
+{
+  "outcome": "INCONCLUSIVE",
+  "exit_code": 2,
+  "reasons": [
+    "reported input-token exposure changed between acquisitions for one declared state"
+  ],
+  "cells": [
+    {
+      "cell": "one",
+      "unit": "ms",
+      "means": {
+        "a": 27.896759999999997,
+        "b": 24.090169999999997,
+        "a2": 28.186919999999997
+      },
+      "outcome": "INCONCLUSIVE",
+      "reason": "ReferenceSpreadExceeded"
+    },
+    {
+      "cell": "three",
+      "unit": "ms",
+      "means": {
+        "a": 118.61331,
+        "b": 27.35688,
+        "a2": 119.36316000000001
+      },
+      "outcome": "PASS",
+      "reason": null
+    },
+    {
+      "cell": "long",
+      "unit": "ms",
+      "means": {
+        "a": 443.92883,
+        "b": 277.25822,
+        "a2": 445.05617
+      },
+      "outcome": "PASS",
+      "reason": null
+    },
+    {
+      "cell": "image",
+      "unit": "ms",
+      "means": {
+        "a": 101.03979,
+        "b": 47.02416,
+        "a2": 100.22021000000001
+      },
+      "outcome": "PASS",
+      "reason": null
+    },
+    {
+      "cell": "packed",
+      "unit": "requests/s",
+      "means": {
+        "a": 37.14682084596953,
+        "b": 40.697751568437134,
+        "a2": 37.26230065448707
+      },
+      "outcome": "INCONCLUSIVE",
+      "reason": "EnvelopeStraddlesTolerance { adverse_bounds: [-0.13883013955188095, 0.06401725008395964] }"
+    }
+  ]
+}

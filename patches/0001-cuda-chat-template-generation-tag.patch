@@ -1,11 +1,12 @@
 diff --git a/tensorfold/cuda/chat_template.py b/tensorfold/cuda/chat_template.py
-index 1077645f..f7449357 100644
 --- a/tensorfold/cuda/chat_template.py
 +++ b/tensorfold/cuda/chat_template.py
-@@ -10,6 +10,23 @@ from tensorfold.server.messages import _normalize_tool_call_arguments, late_syst
+@@ -8,6 +8,23 @@
+ 
+ from tensorfold.server.messages import _normalize_tool_call_arguments, late_system_role, normalize_messages
  from tensorfold.server.request_options import effort_levels
- 
- 
++
++
 +def _generation_tag():
 +    """Hugging Face's ``{% generation %}...{% endgeneration %}`` (it marks assistant tokens for training masks):
 +    rendered as its body, as ``apply_chat_template`` does when no assistant mask is asked for."""
@@ -21,12 +22,10 @@ index 1077645f..f7449357 100644
 +            return jinja2.nodes.Scope(body, lineno=lineno)
 +
 +    return Generation
-+
-+
- class ChatTemplate:
-     """The model's own Jinja chat template, rendered the way Hugging Face's apply_chat_template does."""
  
-@@ -29,7 +46,7 @@ class ChatTemplate:
+ 
+ class ChatTemplate:
+@@ -29,7 +46,7 @@
              raise jinja2.exceptions.TemplateError(message)
  
          env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,

@@ -1,0 +1,42 @@
+{
+  "scope": "Historical measured source, integrated byte-for-byte into the recipe; this is not a new performance measurement of the baked image.",
+  "context": 4096,
+  "hardware": "One GB10, arm64, shared unified memory; another inference service remained resident; external traffic was not isolated.",
+  "plan_sha256": "01374cfb6dd73c448fb6c98c8188840e7e874464fbd327a55682e728936279e1",
+  "collector": {
+    "sha256": "57279b65113e715c7dea38e6eb69d12ed3610729d54bea7a7a0752aee21e477d",
+    "source": "unrecorded",
+    "support": "private unreleased System One extension"
+  },
+  "original_source_manifest_sha256": "3c7ee7e62255cabf5cc28314ac8a19b8eaa94872ffb9dad0b547813ec33b5826",
+  "package_source_manifest_sha256": "69e14f6cbb17bc99bd377d2178cab6a74e2b1a062b439b7a567ffb19e87f1bed",
+  "timing_derivatives_sha256": "db03930c2c439fb33a568d7d9a0323a02fbcd0d07ba065f8aad69908d2aa3e90",
+  "summary_source_sha256": "cb877843c49a82928f46a0818e9715d4cae3a92b03a19ffba40554c513e06647",
+  "comparison_source_sha256": "653f9f2159a8d3bbd5905a4017aca565f4f29af95ddfb9bb5c4f23cf881b9253",
+  "memory_source_sha256": "401eafea97c3203a0196493d427a889f02ad187191bf78490d5f0d06ce39d60f",
+  "fidelity_source_sha256": "7a1fc4e7e0c481457d10b6fb4cdb942cee7e4cf2ed8d0f2a477c006dc776559f",
+  "verification_source_sha256": "5509b2529d991582e4a6c7aa96fafc7c0990c766ee0bcf630f55d6eb2345eace",
+  "baked_image": "sha256:359f54dea5af4e7f835f7ebb56aadc2578d3722332f6592b34236737c814202e",
+  "prior_attempts": [
+    {
+      "implementation": "audited eager",
+      "outcome": "REGRESSION"
+    },
+    {
+      "implementation": "exact-shape graphs before TCP_NODELAY",
+      "outcome": "REGRESSION"
+    },
+    {
+      "implementation": "HTTP-fixed candidate first launch",
+      "outcome": "aborted before weights: CUDA context allocation failed"
+    }
+  ],
+  "recovery": "One D1-weight-file-only read-only POSIX_FADV_DONTNEED operation before the final fresh series; no global cache flush, GPU reset, service stop or serving configuration change.",
+  "gaps": [
+    "Overall performance verdict remains INCONCLUSIVE.",
+    "Cold/new-shape readiness and full-context peak memory are not qualified.",
+    "Original raw payloads and failed-attempt artifacts remain outside git.",
+    "No held-out accuracy claim follows from synthetic fidelity checks."
+  ],
+  "derivative_note": "All warmup and measured waves retained; payloads, raw responses, machine paths and source-identifying text omitted. Each wave pins its original bytes by SHA256."
+}

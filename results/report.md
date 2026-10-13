@@ -1,8 +1,11 @@
-# Measured results
+# Historical pre-audit results
+
+These measurements describe the original packed/quantized implementation, not the current audited native-BF16
+engine. FP8/INT4 are no longer supported by the current recipe. See the [current evidence](audited-bf16/summary.json).
 
 One GB10, warm loopback HTTP. Latency: p50 (p99) milliseconds, CV percent. Packed: median states/s, CV percent.
 
-150 latency samples per workload; 15 packed bursts per mode. Quantized formats differ. These are descriptive sequential runs on a shared host, not a statistically isolated A/B verdict. See [method and caveats](../README.md#benchmark-method-and-results).
+150 latency samples per workload; 15 packed bursts per mode. Quantized formats differ. These are descriptive sequential runs on a shared host, not a statistically isolated A/B verdict. Historical recipe commit: `864a9fe`.
 
 ### BF16 checkpoints: llamacpp-BF16 vs tensorfold-bf16
 

@@ -1,15 +1,14 @@
 diff --git a/tensorfold/families/lfm2/__init__.py b/tensorfold/families/lfm2/__init__.py
-new file mode 100644
-index 00000000..4362a88d
 --- /dev/null
 +++ b/tensorfold/families/lfm2/__init__.py
-@@ -0,0 +1,40 @@
-+"""LFM2 hybrids (short convolutions + GQA attention) on CUDA, served as decision models.
+@@ -0,0 +1,111 @@
++"""LFM2-VL decision models on CUDA (Liquid AI's d1).
 +
-+Liquid AI's d1 checkpoints (``lfm2_vl``, e.g. d1-3B) answer typed questions about a state in one forward with
-+zero output tokens: ``POST /v1/systemone`` takes ``{"state", "questions", "images"?}`` and returns the answers
-+(the same request and response as llama.cpp's llama-server). TensorFold's ``/v1/decisions`` is served too.
-+Generation is not: d1 is not a chat model.
++A d1 checkpoint answers typed questions about a state in one forward with zero output tokens: ``POST
++/v1/systemone`` takes ``{"state", "questions", "images"?}`` and returns the answers (llama-server's System One
++request and response); TensorFold's ``/v1/decisions`` is served too. Generation is not: d1 is not a chat model.
++Only ``LiquidAI/d1-3B`` is tested, so only its ``lfm2_vl`` checkpoints are served: the text-only ``lfm2``
++checkpoints answer decisions with the same prompt format but are not qualified here.
 +"""
 +
 +from __future__ import annotations
@@ -17,25 +16,95 @@ index 00000000..4362a88d
 +from pathlib import Path
 +from typing import Any
 +
-+MODEL_TYPES = ("lfm2_vl", "lfm2")
-+TITLE = "LFM2 (d1 decision models)"
-+LANES = False
++MODEL_TYPES = ("lfm2_vl",)
++TITLE = "LFM2-VL (d1 decision model)"
++LANES = False        # there is no decoding: a decision is one forward a request, not lane rounds of a verify window
 +MODELS = ("LiquidAI/d1-3B",)
-+QUANT_METHODS = {"cuda": (None,)}        # the bf16 checkpoint; quantized copies are made from it at load
++QUANT_METHODS = {"cuda": (None,)}     # the checkpoint's own bf16 weights; no quantized copy is made at load
++# tokens one forward may read (TENSORFOLD_LFM2_TOKEN_BUDGET tightens it, the admitted context caps it)
++TOKEN_BUDGET = 65536
++# TENSORFOLD_LFM2_GRAPHS: exact-shape CUDA graphs on (unset, the default) or off, for an eager comparison
++GRAPH_FLAGS = {"1": True, "on": True, "true": True, "yes": True, "0": False, "off": False, "false": False, "no": False}
 +
 +
-+def cuda_engine(model_dir: str | Path, **options: Any):
-+    """The decision engine. ``TENSORFOLD_LFM2_PRECISION``: bf16 (default), fp8 or int4 weights;
-+    ``TENSORFOLD_LFM2_TOKEN_BUDGET``: tokens packed into one forward; ``TENSORFOLD_LFM2_GRAPHS=0``: no CUDA graphs."""
++def read_text_config(model_dir: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
++    """The checkpoint's config and its text config, refused from JSON alone when the kernels do not read it."""
++
++    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quant_method, read_config
++
++    config = read_config(model_dir)
++    if quant_method(config) is not None:
++        raise ValueError(f"LFM2 d1 runs the checkpoint's own bf16 weights ({MODELS[0]}) and quantizes nothing at "
++                         f"load; this checkpoint stores {describe_quantization(config)}. Serve the bf16 checkpoint "
++                         f"it ships. {OWN_MODEL_HELP}")
++    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
++    heads = int(text.get("num_attention_heads") or 0)
++    kinds = {str(kind) for kind in (text.get("layer_types") or ())}
++    bad = [what for what, ok in (
++        ("a dtype other than bfloat16", str(text.get("dtype") or config.get("dtype") or "bfloat16") != "bfloat16"),
++        ("no layer_types", not kinds),
++        ("a layer that is neither conv nor full_attention", bool(kinds - {"conv", "full_attention"})),
++        ("a convolution bias", bool(text.get("conv_bias"))),
++        ("an attention bias", bool(text.get("attention_bias"))),
++        ("no SwiGLU block", text.get("block_use_swiglu") is False),
++        ("no short convolution (conv_L_cache)", int(text.get("conv_L_cache") or 0) < 1),
++        ("no grouped attention", int(text.get("num_key_value_heads") or 0) < 1 or int(text.get("num_key_value_heads"))
++         > heads),
++        ("a hidden size that is not a whole number of heads",
++         not heads or int(text.get("hidden_size") or 0) % heads),
++        ("no vocabulary", int(text.get("vocab_size") or 0) < 1),
++        ("no MLP width (intermediate_size)", int(text.get("intermediate_size") or 0) < 1),
++        ("no normalization epsilon", not (text.get("norm_eps") or text.get("block_norm_eps"))),
++    ) if ok]
++    if bad:
++        raise ValueError(f"TensorFold's LFM2 kernels cover Liquid AI's d1 decision checkpoints ({MODELS[0]}); this "
++                         f"one has {', '.join(bad)}. {OWN_MODEL_HELP}")
++    return config, text
++
++
++def check(model_dir: str | Path) -> None:
++    """Refuse a checkpoint the kernels do not read, from config.json alone (``pull``, ``info`` and ``serve``)."""
++
++    read_text_config(model_dir)
++
++
++def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
++                master_port: int = 29551, no_drafts: bool = False, context: int | None = None,
++                context_explicit: bool | None = None, **options: Any):
++    """The decision engine: one forward a request, up to ``TENSORFOLD_LFM2_TOKEN_BUDGET`` tokens a forward (65536 by
++    default), ``--context`` bounding a decision's own tokens. Drafts, several ranks and several streams do not
++    apply: a decision decodes nothing, so there is no window to verify together. A tree geometry seen twice is
++    captured as an exact-shape CUDA graph and replayed after that; ``TENSORFOLD_LFM2_GRAPHS=off`` keeps every
++    forward eager, and the graphs' bounded pools are reserved by the startup admission."""
 +
 +    import os
 +
++    if int(tp) != 1 or int(rank) != 0:
++        raise ValueError("LFM2 d1 decisions run on one GPU with one rank: serve with --tp 1 --rank 0")
++    if master:
++        raise ValueError("LFM2 d1 has one rank: drop --master")
++    if drafter:
++        raise ValueError("LFM2 d1 decodes nothing, so there is nothing to draft: --drafter does not apply")
++    stale = os.environ.get("TENSORFOLD_LFM2_PRECISION", "").strip().lower()
++    if stale and stale != "bf16":
++        raise ValueError(f"TENSORFOLD_LFM2_PRECISION={stale}: this engine runs the checkpoint's own bf16 weights and "
++                         "makes no quantized copy at load; drop the variable")
++    asked = os.environ.get("TENSORFOLD_LFM2_GRAPHS", "").strip().lower()
++    if asked and asked not in GRAPH_FLAGS:
++        raise ValueError(f"TENSORFOLD_LFM2_GRAPHS={asked!r}: on/1 (the default: exact-shape CUDA graphs, one a tree "
++                         "geometry, replayed with the new embeddings) or off/0 (every forward eager); drop it")
++    budget = os.environ.get("TENSORFOLD_LFM2_TOKEN_BUDGET", "").strip()
++    if budget and (not budget.isdecimal() or int(budget) < 1):
++        raise ValueError(f"TENSORFOLD_LFM2_TOKEN_BUDGET={budget!r}: a positive token count")
++    if options:
++        raise ValueError(f"LFM2 d1 decisions take no {', '.join(sorted(options))}: they run one request a forward "
++                         "(no --parallel streams, no MTP drafts, no draft model)")
++    check(model_dir)
 +    from .cuda.engine import Engine
 +
-+    precision = os.environ.get("TENSORFOLD_LFM2_PRECISION", "bf16").strip().lower()
-+    budget = int(os.environ.get("TENSORFOLD_LFM2_TOKEN_BUDGET", "65536"))
-+    graphs = os.environ.get("TENSORFOLD_LFM2_GRAPHS", "1") != "0"
-+    return Engine(model_dir, precision=precision, token_budget=budget, graphs=graphs)
++    return Engine(model_dir, context=context, context_explicit=context_explicit,
++                  token_budget=int(budget) if budget else TOKEN_BUDGET,
++                  graphs=GRAPH_FLAGS[asked] if asked else True)
 +
 +
 +def __getattr__(name: str):
@@ -45,165 +114,196 @@ index 00000000..4362a88d
 +        return DecisionApp
 +    raise AttributeError(name)
 diff --git a/tensorfold/families/lfm2/cuda/__init__.py b/tensorfold/families/lfm2/cuda/__init__.py
-new file mode 100644
-index 00000000..75ea6e37
 --- /dev/null
 +++ b/tensorfold/families/lfm2/cuda/__init__.py
 @@ -0,0 +1 @@
 +"""LFM2 decision engine on CUDA."""
 diff --git a/tensorfold/families/lfm2/cuda/app.py b/tensorfold/families/lfm2/cuda/app.py
-new file mode 100644
-index 00000000..2378be42
 --- /dev/null
 +++ b/tensorfold/families/lfm2/cuda/app.py
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,78 @@
 +"""HTTP side of the LFM2 decision engine: ``/v1/systemone`` (llama-server's request and response) and
 +TensorFold's ``/v1/decisions``; chat and completions answer that d1 does not write text."""
 +
 +from __future__ import annotations
 +
-+import base64
-+import io
 +from typing import Any
 +
 +from tensorfold.cuda.server import App, RequestError
++from tensorfold.vision.images import ImageInputError, load_images, split_images
 +
 +from ..decisions import DecisionError
 +
-+MAX_IMAGES = 8
-+
-+
-+def _images(body: dict[str, Any]) -> list:
-+    """Data-URL pictures from ``files``/``images`` and from chat-style ``image_url`` parts of the state."""
-+
-+    urls = list(body.get("files") or []) + list(body.get("images") or [])
-+    state = body.get("state")
-+    messages = state.get("messages") if isinstance(state, dict) else state if isinstance(state, list) else None
-+    if isinstance(messages, list):
-+        for m in messages:
-+            content = m.get("content") if isinstance(m, dict) else None
-+            if isinstance(content, list):
-+                keep = []
-+                for part in content:
-+                    if isinstance(part, dict) and part.get("type") == "image_url":
-+                        url = part.get("image_url")
-+                        urls.append(url.get("url") if isinstance(url, dict) else url)
-+                    else:
-+                        keep.append(part)
-+                m["content"] = keep
-+    if len(urls) > MAX_IMAGES:
-+        raise DecisionError(f"at most {MAX_IMAGES} pictures a request")
-+    out = []
-+    for url in urls:
-+        if not isinstance(url, str) or not url.startswith("data:image/") or "," not in url:
-+            raise DecisionError("pictures are data URLs (data:image/...;base64,...)")
-+        from PIL import Image
-+
-+        out.append(Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB"))
-+    return out
++_MEDIA = ("input_audio", "audio", "video_url", "video")
 +
 +
 +class DecisionApp(App):
++    """``/v1/systemone``: named questions over a state and its pictures, answered in one forward each."""
++
++    def _pictures(self, body: dict[str, Any]) -> tuple[Any, list]:
++        """The state (with its pictures taken out, as llama-server reads a System One state) and the pictures.
++
++        ``files`` and ``images`` hold data URLs; a chat-style state holds ``image_url`` content parts. Everything
++        else in the state stays as it was written, so the rendered decision is the same as llama-server's.
++        """
++
++        state = body["state"]
++        for key in ("files", "images"):
++            if body.get(key) is not None and not isinstance(body[key], list):
++                raise DecisionError(f"{key} must be an array of data URLs")
++        if body.get("videos"):
++            raise DecisionError("videos are not supported")
++        urls = [url for url in list(body.get("files") or []) + list(body.get("images") or [])]
++        messages = state.get("messages") if isinstance(state, dict) else state
++        if isinstance(messages, list) and messages:
++            kept = []
++            for message in messages:
++                content = message.get("content") if isinstance(message, dict) else None
++                if not isinstance(content, list):
++                    kept.append(message)
++                    continue
++                parts = []
++                for part in content:
++                    kind = part.get("type") if isinstance(part, dict) else None
++                    if kind == "image_url":
++                        url = part.get("image_url")
++                        urls.append(url.get("url") if isinstance(url, dict) else url)
++                    elif kind in _MEDIA:
++                        raise DecisionError(f"{kind} is not supported: a decision state takes images")
++                    else:
++                        parts.append(part)
++                kept.append({**message, "content": parts})
++            if isinstance(state, dict):
++                state = {**state, "messages": kept}
++            else:
++                state = kept
++            body["state"] = state
++        if not urls:
++            return state, []
++        if len(urls) > self.image_limits.max_images:
++            raise DecisionError(f"at most {self.image_limits.max_images} pictures a request")
++        try:
++            _, sources = split_images([{"role": "user", "content": [
++                {"type": "image_url", "image_url": {"url": url}} for url in urls]}], limits=self.image_limits)
++            return state, [image.to_pil() for image in load_images(sources, limits=self.image_limits)]
++        except ImageInputError as exc:
++            raise DecisionError(str(exc)) from exc
++
 +    def systemone(self, body: dict[str, Any]) -> dict[str, Any]:
 +        if "state" not in body:
-+            raise DecisionError("a request needs a state (null when the pictures are the whole state)")
++            raise DecisionError("a request needs a state (null when the question is the whole state)")
 +        if "questions" not in body:
 +            raise DecisionError("a request needs questions")
-+        images = _images(body)
-+        if body["state"] is None and not images:
-+            raise DecisionError("a null state needs at least one picture")
-+        out = self.engine.decide(body["state"], body["questions"], images)
++        state, images = self._pictures(body)
++        out = self.engine.decide(state, body["questions"], images)
 +        return {"model": self.served, **out}
 +
 +    def prepare(self, body, chat):  # noqa: D401 - App's signature
 +        raise RequestError("d1 is a decision model and does not write text: use POST /v1/systemone")
 diff --git a/tensorfold/families/lfm2/cuda/engine.py b/tensorfold/families/lfm2/cuda/engine.py
-new file mode 100644
-index 00000000..f318d502
 --- /dev/null
 +++ b/tensorfold/families/lfm2/cuda/engine.py
-@@ -0,0 +1,216 @@
-+"""The LFM2 decision engine: requests in, one batched forward per wakeup, typed answers out.
+@@ -0,0 +1,184 @@
++"""The LFM2 decision engine: a state and its questions in, typed answers out, one forward a request.
 +
-+Requests that arrive while the GPU is busy are answered together in the next forward. One request alone reads
-+its state once (the trunk) and each of its questions as a branch; several requests are packed as rows with the
-+tokens they all share as the trunk. A forward reads at most ``token_budget`` tokens; past that, the next one.
++A request reads its state once (the trunk) and each of its questions as a branch, packed back to back on one
++axis, so many questions cost about one forward. Requests are serialized and never
++share a forward: a packed batch would change each row's arithmetic (cuBLAS picks another kernel for another row
++count), so a decision's answer depends on the request alone and a request answered alone and beside others reads
++the same bits. One forward reads at most ``token_budget`` tokens; a request whose questions do not fit continues
++in the next forward. A tree geometry that has been asked for twice is captured as an exact-shape CUDA graph and
++replayed from then on (``graphs=False`` keeps every forward eager); a new, first or long geometry runs the eager
++path, whose shapes the graph replays unchanged.
 +"""
 +
 +from __future__ import annotations
 +
-+import json
 +import threading
 +import time
-+from concurrent.futures import Future
-+from dataclasses import dataclass, field
 +from pathlib import Path
 +from typing import Any
 +
 +import torch
 +
 +from ..decisions import DecisionError, Format, Question, answer, question
-+from .model import Model, RowGraphs, Tree
++from .graphs import BUDGET, Graphs
++from .model import Model, Tree, packed_token_bytes
 +
 +
-+@dataclass(eq=False)
-+class Request:
-+    state: Any
-+    questions: dict[str, Question]
-+    images: list = field(default_factory=list)
-+    future: Future = field(default_factory=Future)
-+    answers: dict = field(default_factory=dict)
-+    read: int = 0
++def forward_geometry(t: dict, graphs: bool = True) -> "Geometry":
++    """The startup estimate's activation geometry: bytes a decision's forward holds per packed token.
++
++    The graphs' bounded pools are reserved beside it (the budget the graph cache keeps its captures inside), so a
++    --context that cannot fit the weights and both is refused before any weight is loaded.
++    """
++
++    from tensorfold.cuda.capacity import Geometry
++
++    d = int(t["hidden_size"])
++    ffn = int(t["intermediate_size"])
++    heads = int(t["num_attention_heads"])
++    head_dim = int(t.get("head_dim") or d // heads)
++    per_token = packed_token_bytes(d, ffn, heads, head_dim)
++    # the graph budget in cache slots: what the retained graphs may hold, charged to the window's own workspace
++    reserve = -(-BUDGET // per_token) if graphs else 0
++    return Geometry(bytes_at=lambda slots: slots * per_token, reserve=reserve, minimum_slots=1)
++
++
++def weight_bytes(name: str, info: dict) -> tuple[int, int]:
++    """Every checkpoint tensor is read as it is stored: bf16 language weights and the vision tower."""
++
++    from tensorfold.cuda.geometry import size
++
++    return size(info, name), 0
 +
 +
 +class Engine:
 +    eos: tuple[int, ...] = ()
 +    supports_logprobs = False
 +
-+    def __init__(self, model_dir: str | Path, precision: str = "bf16", token_budget: int = 65536,
-+                 graphs: bool = True):
++    def __init__(self, model_dir: str | Path, context: int | None = None, context_explicit: bool | None = None,
++                 token_budget: int = 65536, graphs: bool = True):
 +        from tokenizers import Tokenizer
 +
++        from tensorfold.cuda.capacity import admit
++
 +        self.model_dir = Path(model_dir)
-+        raw = json.loads((self.model_dir / "config.json").read_text())
-+        self.context = int(raw.get("text_config", raw)["max_position_embeddings"])
-+        self.token_budget = int(token_budget)
-+        if self.token_budget <= 0:
-+            raise ValueError("token_budget must be positive")
++        self.served = 0
 +        self._gpu_lock = threading.Lock()
-+        t0 = time.perf_counter()
-+        self.model = Model.load(self.model_dir, precision)
++        if int(token_budget) < 1:
++            raise ValueError("token_budget must be positive")
++        self.graphs_on = bool(graphs)
++        torch.cuda.set_device(0)
++        # one admission for the weights, a decision's activations and the graphs' pools, before any weight is loaded
++        self.capacity_plan = admit(self.model_dir, context, context_explicit, torch,
++                                   lambda t: forward_geometry(t, self.graphs_on), weight_bytes)
++        self.context = self.context_window = int(self.capacity_plan["context_window"])
++        self.token_budget = min(int(token_budget), self.context)
++        started = time.perf_counter()
++        self.model = Model.load(self.model_dir)
++        self.graphs = Graphs(self.model) if self.graphs_on else None
 +        self.vision = None
-+        if "vision_config" in raw:
++        if self.model.cfg.vision:
 +            from .vision import Vision
++
 +            self.vision = Vision.load(self.model_dir)
 +        self.fmt = Format(Tokenizer.from_file(str(self.model_dir / "tokenizer.json")))
-+        self.graphs = None
-+        if graphs:
-+            pad = raw.get("pad_token_id") or raw.get("text_config", {}).get("pad_token_id") or 0
-+            self.graphs = RowGraphs(self.model, int(pad))
-+            self.graphs.warm()
-+        self.precision = precision
-+        self.load_s = time.perf_counter() - t0
-+        self.served = 0
-+        self._queue: list[Request] = []
-+        self._cv = threading.Condition()
-+        self._worker = threading.Thread(target=self._loop, name="lfm2-decisions", daemon=True)
-+        self._worker.start()
++        self.load_s = time.perf_counter() - started
 +
 +    # ---------------------------------------------------------------- api
 +
 +    def decide(self, state: Any, questions: dict[str, Any], images: list | None = None) -> dict[str, Any]:
++        """The answers to a request's questions; the state and the questions' own tokens are all it reads."""
++
 +        if not isinstance(questions, dict) or not questions:
 +            raise DecisionError("questions is a non-empty object of id: question")
-+        qs = {str(name): question(raw) for name, raw in questions.items()}
++        named = [(str(name), question(raw)) for name, raw in questions.items()]
 +        if images and self.vision is None:
 +            raise DecisionError("this checkpoint has no vision tower")
-+        req = Request(state, qs, list(images or []))
-+        with self._cv:
-+            self._queue.append(req)
-+            self._cv.notify()
-+        return req.future.result()
++        with self._gpu_lock:
++            answers, read = self._answer(state, named, list(images or []))
++        self.served += 1
++        return {"answers": answers, "usage": {"input_tokens": read, "output_tokens": 0}}
 +
 +    def generate(self, *_, **__):
 +        raise DecisionError("d1 is a decision model and does not write text: use POST /v1/systemone")
@@ -220,21 +320,38 @@ index 00000000..f318d502
 +            logits = torch.nn.functional.linear(hidden, self.model.embed).float()[0]
 +            return logits[list(label_ids)].tolist(), float(logits.logsumexp(0))
 +
-+    # ---------------------------------------------------------------- batching
++    # ---------------------------------------------------------------- forwards
 +
-+    def _loop(self) -> None:
-+        while True:
-+            with self._cv:
-+                while not self._queue:
-+                    self._cv.wait()
-+                batch, self._queue = self._queue, []
-+            try:
-+                with self._gpu_lock:
-+                    self._run(batch)
-+            except Exception as exc:  # noqa: BLE001 - a failed forward fails its requests, not the server
-+                for r in batch:
-+                    if not r.future.done():
-+                        r.future.set_exception(exc)
++    def _answer(self, state: Any, named: list[tuple[str, Question]], images: list) -> tuple[dict, int]:
++        """One trunk, one branch a question, as many questions a forward as the token budget holds."""
++
++        f = self.fmt
++        embeds = None
++        if images:
++            trunk, embeds = self.vision.trunk(self.model, f, state, images)
++        else:
++            trunk = f.encode(f.prefix(state))
++        branches = [f.encode(f.suffix(q)) for _, q in named]
++        groups = [f.readout(q) for _, q in named]
++        answers: dict[str, Any] = {}
++        start = 0
++        while start < len(branches):
++            end = self._chunk(branches, start, len(trunk))
++            hidden = self._forward(trunk, branches[start:end], embeds)
++            for (name, q), scores in zip(named[start:end], self._scores(hidden, groups[start:end])):
++                answers[name] = answer(q, scores)
++            start = end
++        return answers, len(trunk) + sum(map(len, branches))
++
++    def _chunk(self, branches: list[list[int]], start: int, trunk: int) -> int:
++        """Where the forward starting at ``start`` ends: the questions whose tokens fit the budget with the trunk,
++        and always at least one (a question that does not fit is refused by ``_check_size``)."""
++
++        end, used = start, trunk + len(branches[start])
++        while end + 1 < len(branches) and used + len(branches[end + 1]) <= self.token_budget:
++            used += len(branches[end + 1])
++            end += 1
++        return end + 1
 +
 +    def _check_size(self, trunk: int, lengths: list[int]) -> None:
 +        if not lengths or min(lengths) <= 0:
@@ -251,97 +368,27 @@ index 00000000..f318d502
 +        x = self.model.embed[ids]
 +        if embeds is not None:                       # pictures: their features replace the trunk's image slots
 +            x[: len(trunk)] = embeds
++        if self.graphs is not None:
++            # the graph copies the whole of x, pictures included, into its own input before replaying: a replay
++            # can never read an earlier request's tokens or features
++            out = self.graphs.forward(len(trunk), [len(r) for r in rows], x)
++            if out is not None:                      # this geometry replays: the eager path's own bits, its own shapes
++                return out
 +        tree = Tree(len(trunk), [len(r) for r in rows], dev, self.model.cfg.taps)
 +        return self.model.forward(x, tree)
 +
-+    def _scores(self, hidden: torch.Tensor, groups_per_row: list[list[list[int]]]) -> list[list[float]]:
-+        union = sorted({t for groups in groups_per_row for g in groups for t in g})
-+        where = {t: i for i, t in enumerate(union)}
-+        logits = self.model.logits(hidden, torch.tensor(union, device=hidden.device)).tolist()
-+        return [[max(row[where[t]] for t in g) for g in groups] for row, groups in zip(logits, groups_per_row)]
++    def _scores(self, hidden: torch.Tensor, groups: list[list[list[int]]]) -> list[list[float]]:
++        """Each row's best logit an option, read with that question's own tokens only: the option set of another
++        question (or another request) never changes a row's logits or how many rows the head multiplies."""
 +
-+    @staticmethod
-+    def _shared(rows: list[list[int]]) -> int:
-+        n = min(map(len, rows)) - 1
-+        s = 0
-+        while s < n and len({r[s] for r in rows}) == 1:
-+            s += 1
-+        return s
-+
-+    @torch.inference_mode()
-+    def _run(self, batch: list[Request]) -> None:
-+        f = self.fmt
-+        # requests with pictures, or one request with several questions: their own pass, the state as the trunk
-+        solo = [r for r in batch if r.images or (len(batch) == 1 and len(r.questions) > 1)]
-+        alone = {id(r) for r in solo}
-+        packed = [r for r in batch if id(r) not in alone]
-+        for r in solo:
-+            try:
-+                self._solo(r)
-+            except Exception as exc:  # noqa: BLE001
-+                r.future.set_exception(exc)
-+        if not packed:
-+            return
-+        rows, owners = [], []
-+        for r in packed:
-+            try:
-+                request_rows = [(name, q, f.encode(f.prefix(r.state) + f.suffix(q)))
-+                                for name, q in r.questions.items()]
-+                for _, _, row in request_rows:
-+                    self._check_size(0, [len(row)])
-+            except Exception as exc:
-+                r.future.set_exception(exc)
-+                continue
-+            for name, q, row in request_rows:
-+                rows.append(row)
-+                owners.append((r, name, q))
-+        start = 0
-+        while start < len(rows):
-+            end, used = start, 0
-+            while end < len(rows) and (end == start or used + len(rows[end]) <= self.token_budget):
-+                used += len(rows[end])
-+                end += 1
-+            chunk = rows[start:end]
-+            if len(chunk) == 1 and self.graphs is not None and self.graphs.bucket(len(chunk[0])):
-+                hidden = self.graphs.run(chunk[0])
-+            else:
-+                shared = self._shared(chunk) if len(chunk) > 1 else len(chunk[0]) - 1
-+                hidden = self._forward(chunk[0][:shared], [row[shared:] for row in chunk])
-+            groups = [f.readout(q) for _, _, q in owners[start:end]]
-+            for i, scores in enumerate(self._scores(hidden, groups), start):
-+                r, name, q = owners[i]
-+                r.answers[name] = answer(q, scores)
-+                r.read += len(rows[i])
-+            start = end
-+        for r in packed:
-+            if r.future.done():
-+                continue
-+            self.served += 1
-+            r.future.set_result({"answers": {n: r.answers[n] for n in r.questions},
-+                                 "usage": {"input_tokens": r.read, "output_tokens": 0}})
-+
-+    def _solo(self, r: Request) -> None:
-+        f = self.fmt
-+        embeds = None
-+        qs = list(r.questions.values())
-+        if r.images and len(qs) == 1:             # one question over pictures: the whole prompt as one row
-+            row, embeds = self.vision.trunk(self.model, f, r.state, r.images, suffix=f.suffix(qs[0]))
-+            trunk, branches, embeds = row[:-1], [row[-1:]], embeds[:-1]
-+        elif r.images:
-+            trunk, embeds = self.vision.trunk(self.model, f, r.state, r.images)
-+            branches = [f.encode(f.suffix(q)) for q in qs]
-+        else:
-+            trunk = f.encode(f.prefix(r.state))
-+            branches = [f.encode(f.suffix(q)) for q in qs]
-+        hidden = self._forward(trunk, branches, embeds)
-+        groups = [f.readout(q) for q in r.questions.values()]
-+        answers = {name: answer(q, s) for (name, q), s in zip(r.questions.items(), self._scores(hidden, groups))}
-+        self.served += 1
-+        r.future.set_result({"answers": answers,
-+                             "usage": {"input_tokens": len(trunk) + sum(map(len, branches)), "output_tokens": 0}})
++        out = []
++        for row, group in zip(hidden, groups):
++            ids = sorted({t for g in group for t in g})
++            logits = self.model.logits(row[None], torch.tensor(ids, device=hidden.device))[0]
++            where = {t: i for i, t in enumerate(ids)}
++            out.append([float(max(logits[where[t]] for t in g)) for g in group])
++        return out
 diff --git a/tensorfold/families/lfm2/cuda/fused.py b/tensorfold/families/lfm2/cuda/fused.py
-new file mode 100644
-index 00000000..389c3107
 --- /dev/null
 +++ b/tensorfold/families/lfm2/cuda/fused.py
 @@ -0,0 +1,133 @@
@@ -478,177 +525,242 @@ index 00000000..389c3107
 +        _qk_norm_rope[(t, heads + kv_heads)](qkv, q_w, k_w, cos, sin, q, k, eps, H=heads, KV=kv_heads, D=head_dim,
 +                                             num_warps=1, enable_fp_fusion=False)
 +    return q, k
-diff --git a/tensorfold/families/lfm2/cuda/linear.py b/tensorfold/families/lfm2/cuda/linear.py
-new file mode 100644
-index 00000000..37a6593d
+diff --git a/tensorfold/families/lfm2/cuda/graphs.py b/tensorfold/families/lfm2/cuda/graphs.py
 --- /dev/null
-+++ b/tensorfold/families/lfm2/cuda/linear.py
-@@ -0,0 +1,159 @@
-+"""The projections of the LFM2 engine in one of three precisions.
++++ b/tensorfold/families/lfm2/cuda/graphs.py
+@@ -0,0 +1,228 @@
++"""Exact-shape CUDA graphs for d1 decisions: one graph a tree geometry, fed the eager path's own inputs.
 +
-+``bf16``  the checkpoint's own weights through cuBLAS.
-+``fp8``   W8A16: e4m3 weights with an fp32 scale per (row, 64 inputs), bf16 activations. Few rows run on TensorFold's
-+          exact-weight FP8 lane matmul (the weight bytes are the cost); many rows run the same weights, dequantized
-+          once to bf16, through cuBLAS (the math is the cost there). Both read the same weight values.
-+``int4``  W4A16 affine integers, a bf16 scale and bias per 32 inputs (MLX's 4-bit layout), on TensorFold's 4-bit
-+          lane matmul (the one it serves MLX checkpoints with): 5 bits a weight. Each group's scale and bias come
-+          from a weighted least-squares search over candidate ranges, as llama.cpp's k-quants choose theirs.
-+Quantized copies are made from the bf16 checkpoint at load, so no extra download is needed.
++A tree's geometry (the trunk's length and every branch's length) fixes every shape, index tensor and kernel launch
++of a forward, so a graph captured for one geometry replays the eager path's arithmetic exactly: the same kernels
++over the same shapes, with the packed embeddings copied into the graph's own input buffer before every replay.
++Nothing is padded and no row is added, so a replayed decision reads the bits its own forward reads, and a shape
++with no graph runs the eager path unchanged.
++
++A geometry is captured only once it has been asked for :data:`PROMOTE` times, so a first or one-off shape never
++pays for a capture it will not use. The graphs that are kept stay inside :data:`LIMIT` entries and :data:`BUDGET`
++bytes of captured pool, input and output (the startup admission reserves that budget); the room a new shape needs
++comes from the least recently used graph that has replayed fewer times than the new shape has been seen, so a
++graph that has proved its use is never churned out by a shape nobody has asked for again — a working set bigger
++than the cache simply runs eagerly. Every method that touches a buffer runs under ``no_grad``, like the
++``Model.forward`` it captures, and replay fires on the caller's stream, so a graphed decision has the eager
++path's mode and ordering.
 +"""
 +
 +from __future__ import annotations
 +
++import gc
++
 +import torch
-+import torch.nn.functional as F
 +
-+PRECISIONS = ("bf16", "fp8", "int4")
-+# int4: groups of 32 with the weighted search, on d1-3B's parity set close to llama.cpp's Q4_K_M (groups of 64 are
-+# faster on sm_12x's grouped kernel but lose about twice the probability: median |dp| 0.028 vs 0.016)
-+INT4_GROUP, INT4_STEPS = 32, 20
-+# at or above this many rows a quantized projection runs its bf16 copy through cuBLAS
-+DENSE_ROWS = 256
++from .model import BF16_BYTES, Tree, packed_token_bytes
 +
-+
-+class Bf16:
-+    def __init__(self, w: torch.Tensor):
-+        self.w = w.contiguous()
-+
-+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-+        return F.linear(x, self.w)
-+
-+    def nbytes(self) -> int:
-+        return self.w.numel() * 2
++# sightings before a geometry is captured (the first runs eagerly, so a one-off shape is never captured)
++PROMOTE = 2
++# resident graphs, and the bytes their captured pools, inputs and outputs together may hold
++LIMIT = 8
++BUDGET = 2 * 1024**3
++# geometries whose sightings are counted; past it the oldest are forgotten and their count starts over
++REMEMBER = 4096
 +
 +
-+class Quantized:
-+    """A TensorFold FP8 or 4-bit lane-matmul linear, with the same values in bf16 for wide prompts."""
++class Roster:
++    """Which tree geometries hold a graph, and which give way: the promotion, the budget and the LRU order.
 +
-+    def __init__(self, inner, dense: torch.Tensor):
-+        self.inner, self.dense = inner, dense
-+
-+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-+        if x.shape[0] >= DENSE_ROWS:
-+            return F.linear(x, self.dense)
-+        return self.inner(x)
-+
-+    def nbytes(self) -> int:
-+        """Bytes a few-row forward reads (the quantized weights)."""
-+        return self.inner.nbytes()
-+
-+
-+def fp8(w: torch.Tensor) -> Quantized:
-+    """W8A16 with an fp32 scale per (row, 64 inputs): TensorFold's block FP8 (FP8G) lane matmul."""
-+
-+    from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear
-+
-+    n, k = w.shape
-+    w32 = w.float().view(n, k // 64, 64)
-+    scale = (w32.abs().amax(-1) / 448.0).clamp(min=1e-12)           # [n, k/64]
-+    codes = (w32 / scale[..., None]).clamp(-448, 448).to(torch.float8_e4m3fn)
-+    dense = (codes.float() * scale[..., None]).view(n, k).to(torch.bfloat16)
-+    return Quantized(Fp8BlockLinear.from_rows(codes.view(n, k), scale.contiguous()), dense)
-+
-+
-+def _affine_params(g: torch.Tensor, top: int, steps: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
-+    """bf16 (scale, bias) per row of ``g`` [G, gs] minimizing the weighted error of ``scale * q + bias``.
-+
-+    Candidate ranges stretch and shrink the min..max step (``rmin + rdelta * i``, llama.cpp's make_qkx2_quants);
-+    for each, the levels are fixed and the scale and bias solved by weighted least squares, then rounded to bf16
-+    as they are stored. Weights ``|x| + rms(x)`` favor the large inputs, as k-quants do without an imatrix.
++    No CUDA here: the promotion, the byte budget, the LRU order and the eviction rule are plain Python, so they
++    are tested without a GPU.
 +    """
 +
-+    lo, hi = g.amin(-1, keepdim=True), g.amax(-1, keepdim=True)
-+    span = (hi - lo).clamp(min=1e-12)
-+    wt = g.abs() + g.pow(2).mean(-1, keepdim=True).sqrt()
-+    sw = wt.sum(-1, keepdim=True)
-+    swx = (wt * g).sum(-1, keepdim=True)
++    def __init__(self, budget: int = BUDGET, limit: int = LIMIT, promote: int = PROMOTE,
++                 remember: int = REMEMBER) -> None:
++        self.budget, self.limit, self.promote = int(budget), int(limit), int(promote)
++        self.remember = int(remember)
++        self.sizes: dict[tuple, int] = {}          # resident geometry -> bytes it reserves
++        self.heat: dict[tuple, int] = {}           # every geometry -> its sightings
++        self.benefit: dict[tuple, int] = {}        # resident geometry -> its replays
++        self.order: list[tuple] = []               # resident geometries, least recently used first
++        self.used = 0
++        self.captures = self.replays = self.eager = self.evictions = 0
 +
-+    def error(scale, bias):
-+        q = ((g - bias) / scale).round().clamp(0, top)
-+        return (wt * (q * scale + bias - g).pow(2)).sum(-1, keepdim=True)
++    def resident(self, key: tuple) -> bool:
++        return key in self.sizes
 +
-+    best_s = (span / top).to(torch.bfloat16).float()
-+    best_b = lo.to(torch.bfloat16).float()
-+    best_e = error(best_s, best_b)
-+    for i in range(steps + 1):
-+        q = ((g - lo) * ((top - 1.0 + 0.1 * i) / span)).round().clamp(0, top)
-+        swq, swq2, swqx = (wt * q).sum(-1, keepdim=True), (wt * q * q).sum(-1, keepdim=True), \
-+            (wt * q * g).sum(-1, keepdim=True)
-+        det = sw * swq2 - swq * swq
-+        ok = det > 0
-+        safe = torch.where(ok, det, torch.ones_like(det))
-+        s = ((sw * swqx - swq * swx) / safe).clamp(min=1e-12).to(torch.bfloat16).float()
-+        b = ((swq2 * swx - swq * swqx) / safe).to(torch.bfloat16).float()
-+        e = torch.where(ok, error(s, b), torch.full_like(best_e, float("inf")))
-+        better = e < best_e
-+        best_s, best_b, best_e = torch.where(better, s, best_s), torch.where(better, b, best_b), \
-+            torch.where(better, e, best_e)
-+    return best_s, best_b
++    def fits(self, cost: int) -> bool:
++        """A geometry that cannot fill the budget by itself is never captured (its forward stays eager)."""
 +
++        return int(cost) <= self.budget
 +
-+def _affine(w: torch.Tensor, bits: int, gs: int, rows: int = 2048):
-+    """MLX affine quantization of a bf16 weight: (int32 words, bf16 scales, bf16 biases, bf16 dequantized copy)."""
++    def note(self, key: tuple) -> int:
++        """Count a sighting and return the geometry's heat; only ``remember`` geometries are tracked."""
 +
-+    n, k = w.shape
-+    top = (1 << bits) - 1
-+    scales = torch.empty((n, k // gs), dtype=torch.bfloat16, device=w.device)
-+    biases = torch.empty_like(scales)
-+    q = torch.empty((n, k // gs, gs), dtype=torch.int64, device=w.device)
-+    dense = torch.empty((n, k), dtype=torch.bfloat16, device=w.device)
-+    for r in range(0, n, rows):                                 # in row chunks: the search keeps a few fp32 copies
-+        g = w[r:r + rows].float().view(-1, k // gs, gs)
-+        s, b = _affine_params(g.reshape(-1, gs), top, INT4_STEPS)
-+        s, b = s.view(-1, k // gs, 1), b.view(-1, k // gs, 1)
-+        qr = ((g - b) / s).round().clamp(0, top)
-+        scales[r:r + rows], biases[r:r + rows] = s[..., 0].to(torch.bfloat16), b[..., 0].to(torch.bfloat16)
-+        q[r:r + rows] = qr.to(torch.int64)
-+        dense[r:r + rows] = (qr * s + b).view(-1, k).to(torch.bfloat16)
-+    per = 32 // bits
-+    q = q.view(n, k // per, per)
-+    words = torch.zeros((n, k // per), dtype=torch.int64, device=w.device)
-+    for j in range(per):                                        # little-endian slots, MLX's packing
-+        words |= q[..., j] << (bits * j)
-+    words = torch.where(words >= 1 << 31, words - (1 << 32), words).to(torch.int32)
-+    return words.contiguous(), scales.contiguous(), biases.contiguous(), dense
++        self.heat[key] = self.heat.get(key, 0) + 1
++        while len(self.heat) > self.remember:      # dicts keep insertion order, so this drops the oldest geometry
++            self.heat.pop(next(iter(self.heat)))
++        return self.heat[key]
 +
++    def wanted(self, key: tuple) -> bool:
++        """Whether this sighting is the one that captures: the promotion count is reached and no graph is kept."""
 +
-+class _Q4:
-+    def __init__(self, q):
-+        from tensorfold.cuda.kernels import qmm
++        return key not in self.sizes and self.heat.get(key, 0) >= self.promote
 +
-+        self.q, self._mm = q, qmm.matmul
++    def room_for(self, cost: int, heat: int) -> list[tuple] | None:
++        """The graphs a shape this hot may take the place of, or ``None`` when it cannot have room.
 +
-+    def __call__(self, x):
-+        return self._mm(x.contiguous(), self.q)
++        The least recently used graph goes first, and only while it has replayed fewer times than this shape has
++        been seen: a graph that is earning its keep is not evicted for a shape nobody has asked for again.
++        """
 +
-+    def nbytes(self) -> int:
-+        return sum(t.numel() * t.element_size() for t in (self.q.weight, self.q.scales, self.q.biases))
++        gone, used, order = [], self.used, list(self.order)
++        while order and (used + int(cost) > self.budget or len(order) >= self.limit):
++            victim = order[0]
++            if self.benefit.get(victim, 0) >= heat:
++                return None
++            order.pop(0)
++            gone.append(victim)
++            used -= self.sizes[victim]
++        return gone
 +
++    def admit(self, key: tuple, cost: int) -> None:
++        """Record a geometry that now holds a graph (its room was made by ``room_for``)."""
 +
-+def int4(w: torch.Tensor) -> Quantized:
-+    from tensorfold.cuda.kernels import qmm
++        self.sizes[key] = int(cost)
++        self.benefit[key] = 0
++        self.used += int(cost)
++        self.order.append(key)
 +
-+    words, scales, biases, dense = _affine(w, 4, INT4_GROUP)
-+    return Quantized(_Q4(qmm.pack(words, scales, biases, INT4_GROUP)), dense)
++    def replay(self, key: tuple) -> None:
++        """A graph replayed: its benefit and the run's replay count."""
 +
++        self.benefit[key] = self.benefit.get(key, 0) + 1
++        self.replays += 1
++        self.touch(key)
 +
-+def make(w: torch.Tensor, precision: str):
-+    if precision == "bf16":
-+        return Bf16(w)
-+    if precision == "int4":
-+        return int4(w)
-+    if precision == "fp8":
-+        return fp8(w)
-+    raise ValueError(f"precision {precision!r}: choose one of {', '.join(PRECISIONS)}")
++    def touch(self, key: tuple) -> None:
++        if key in self.sizes:
++            self.order.remove(key)
++            self.order.append(key)
++
++    def drop(self, key: tuple) -> tuple:
++        """An evicted geometry: its heat starts over, so a capture needs :data:`PROMOTE` fresh sightings again."""
++
++        self.used -= self.sizes.pop(key)
++        self.benefit.pop(key, None)
++        self.heat.pop(key, None)
++        self.order.remove(key)
++        self.evictions += 1
++        return key
++
++    def stats(self) -> dict:
++        return {"resident": len(self.sizes), "bytes": self.used, "budget_bytes": self.budget, "limit": self.limit,
++                "promote": self.promote, "captures": self.captures, "replays": self.replays,
++                "eager": self.eager, "evictions": self.evictions}
 +
 +
-+Linear = Bf16 | Quantized
++class Graphs:
++    """The resident graphs and their buffers, keyed by a tree's geometry (its trunk and branch lengths)."""
++
++    def __init__(self, model, *, budget: int = BUDGET, limit: int = LIMIT, promote: int = PROMOTE) -> None:
++        self.model = model
++        self.roster = Roster(budget, limit, promote)
++        self.entries: dict[tuple, tuple] = {}      # geometry -> (graph, its input buffer, its tree, its output)
++        self.pool = None                           # a pool handle while any graph is live, so captures share it
++
++    @staticmethod
++    def key(p: int, lengths) -> tuple:
++        return int(p), tuple(int(n) for n in lengths)
++
++    def cost(self, tokens: int) -> int:
++        """Bytes a graph for ``tokens`` packed tokens reserves: its forward's activations, its input and its output.
++
++        The pool a capture keeps is its forward's peak live set, which the per-token figure admission sizes (an
++        upper bound, not a measurement); the input and the rows of output are counted beside it.
++        """
++
++        c = self.model.cfg
++        return tokens * (packed_token_bytes(c.hidden, c.ffn, c.heads, c.head_dim) + 2 * BF16_BYTES * c.hidden)
++
++    @torch.no_grad()
++    def forward(self, p: int, lengths, x: torch.Tensor) -> torch.Tensor | None:
++        """The graphed rows for this geometry, or ``None`` to run the eager path (a new shape, or no room).
++
++        ``x`` is the packed embeddings the eager path built: they are copied into the graph's own input before it
++        replays, so no replay can read an earlier request's tokens or features. The rows come back as a clone, so a
++        caller's tensor can never be overwritten by a later replay.
++        """
++
++        key = self.key(p, lengths)
++        entry = self.entries.get(key)
++        if entry is None:
++            entry = self._promote(key, p, lengths, x)
++            if entry is None:
++                return None
++        graph, buf, _tree, out = entry
++        if buf.shape != x.shape:                   # a key that no longer names its own shape is a programming error
++            raise RuntimeError(f"a {tuple(buf.shape)} graph cannot take a {tuple(x.shape)} forward")
++        buf.copy_(x)
++        graph.replay()
++        self.roster.replay(key)
++        return out.clone()                         # the caller's rows, not the graph's buffer: a later replay is safe
++
++    @torch.no_grad()
++    def _promote(self, key: tuple, p: int, lengths, x: torch.Tensor) -> tuple | None:
++        """Capture this geometry's forward if it is hot enough and can have room; else ``None`` (the eager path)."""
++
++        cost = self.cost(x.shape[0])
++        heat = self.roster.note(key)
++        room = self.roster.room_for(cost, heat) if self.roster.wanted(key) and self.roster.fits(cost) else None
++        if room is None:
++            self.roster.eager += 1
++            return None
++        self._forget(room)
++        if self.pool is None:
++            self.pool = torch.cuda.graph_pool_handle()
++        device, cfg = self.model.embed.device, self.model.cfg
++        buf = torch.empty_like(x)                  # the graph's own input, never reallocated: the capture points at it
++        buf.copy_(x)
++        tree = Tree(p, list(lengths), device, cfg.taps)
++        torch.cuda.synchronize()
++        stream = torch.cuda.Stream()
++        stream.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(stream):            # compile the kernels and settle cuBLAS' plans outside the capture
++            self.model.forward(buf, tree)
++            self.model.forward(buf, tree)
++        torch.cuda.current_stream().wait_stream(stream)
++        torch.cuda.synchronize()
++        graph = torch.cuda.CUDAGraph()
++        enabled = gc.isenabled()
++        gc.disable()                               # collecting a graph mid-capture invalidates it
++        try:
++            with torch.cuda.graph(graph, pool=self.pool):
++                out = self.model.forward(buf, tree)
++        finally:
++            if enabled:
++                gc.enable()
++        torch.cuda.synchronize()
++        self.entries[key] = (graph, buf, tree, out)
++        self.roster.admit(key, cost)               # only a captured geometry is recorded, so a failed one stays eager
++        self.roster.captures += 1
++        return self.entries[key]
++
++    def _forget(self, keys: list[tuple]) -> None:
++        """Drop evicted geometries; a pool left without a graph cannot be captured into again."""
++
++        if not keys:
++            return
++        for key in keys:
++            self.entries.pop(key, None)
++            self.roster.drop(key)
++        torch.cuda.synchronize()
++        gc.collect()                               # a destroyed graph must be gone before the next capture
++        if not self.entries:
++            self.pool = None
++
++    def stats(self) -> dict:
++        return self.roster.stats()
 diff --git a/tensorfold/families/lfm2/cuda/model.py b/tensorfold/families/lfm2/cuda/model.py
-new file mode 100644
-index 00000000..f8ce1498
 --- /dev/null
 +++ b/tensorfold/families/lfm2/cuda/model.py
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,244 @@
 +"""LFM2 on CUDA: the hybrid stack (short convolutions and GQA attention) over a tree of packed rows.
 +
 +A forward reads one trunk (the tokens every row shares) and N branches packed back to back on one axis,
@@ -658,11 +770,13 @@ index 00000000..f8ce1498
 +flash call (the trunk's keys read once for all branches), and each branch over its own tokens in one varlen
 +flash call, the two merged by their log-sum-exp. A decision needs only a handful of logits, so the 128k-row
 +tied head is never applied: callers take the rows they need from ``logits``.
++
++The weights are the checkpoint's own bf16 tensors through cuBLAS, in the order `hybrid.py` (Liquid AI's d1
++runner) runs them: nothing is quantized at load and no precision is traded for speed.
 +"""
 +
 +from __future__ import annotations
 +
-+import json
 +from dataclasses import dataclass, field
 +from pathlib import Path
 +
@@ -670,9 +784,19 @@ index 00000000..f8ce1498
 +import torch.nn.functional as F
 +
 +from . import fused
-+from . import linear as L
 +
 +Tensor = torch.Tensor
++
++# bytes one packed token's forward holds at once: the bf16 activations (residual stream copies, the merged q|k|v
++# and gate|up projections, the short convolution's projection and the silu output) and the two fp32 attention
++# outputs that the log-sum-exp merge reads. Admission and the graphs' pool bound share this figure.
++BF16_BYTES, FP32_BYTES = 2, 4
++
++
++def packed_token_bytes(hidden: int, ffn: int, heads: int, head_dim: int) -> int:
++    """Bytes one packed token's forward holds at once, from a config or a checkpoint's text config."""
++
++    return BF16_BYTES * (8 * hidden + 3 * hidden + 5 * ffn + hidden) + FP32_BYTES * 2 * heads * head_dim
 +
 +
 +@dataclass
@@ -687,24 +811,26 @@ index 00000000..f8ce1498
 +    theta: float
 +    taps: int
 +    vocab: int
++    vision: bool
 +
 +    @classmethod
 +    def read(cls, model_dir: Path) -> "Config":
-+        raw = json.loads((model_dir / "config.json").read_text())
-+        t = raw.get("text_config", raw)
++        from .. import read_text_config
++
++        raw, t = read_text_config(model_dir)
 +        hidden, heads = int(t["hidden_size"]), int(t["num_attention_heads"])
-+        ffn = int(t.get("block_ff_dim", t["intermediate_size"]))
++        ffn = int(t["intermediate_size"])
 +        if t.get("block_auto_adjust_ff_dim"):
 +            ffn = int(2 * ffn / 3)
 +            if t.get("block_ffn_dim_multiplier") is not None:
 +                ffn = int(t["block_ffn_dim_multiplier"] * ffn)
 +            m = int(t["block_multiple_of"])
 +            ffn = m * ((ffn + m - 1) // m)
++        head_dim = int(t.get("head_dim") or hidden // heads)
 +        rope = t.get("rope_parameters") or {"rope_theta": t.get("rope_theta", 1e6)}
-+        if t.get("conv_bias") or (t.get("block_use_swiglu") is False):
-+            raise ValueError("LFM2 checkpoints with conv biases or without SwiGLU are not supported")
-+        return cls(hidden, heads, int(t["num_key_value_heads"]), hidden // heads, ffn, list(t["layer_types"]),
-+                   float(t["norm_eps"]), float(rope["rope_theta"]), int(t["conv_L_cache"]), int(t["vocab_size"]))
++        return cls(hidden, heads, int(t["num_key_value_heads"]), head_dim, ffn, list(t["layer_types"]),
++                   float(t.get("norm_eps") or t.get("block_norm_eps")), float(rope["rope_theta"]),
++                   int(t["conv_L_cache"]), int(t["vocab_size"]), isinstance(raw.get("vision_config"), dict))
 +
 +
 +class Tree:
@@ -768,10 +894,10 @@ index 00000000..f8ce1498
 +    kind: str
 +    op_norm: Tensor
 +    ffn_norm: Tensor
-+    up: L.Linear              # MLP gate and up, merged: [2 ffn, hidden]
-+    down: L.Linear
-+    proj: L.Linear            # conv: in_proj [3 hidden, hidden]; attention: q|k|v merged
-+    out: L.Linear
++    up: Tensor            # the MLP gate and up, merged: [2 ffn, hidden]
++    down: Tensor
++    proj: Tensor          # conv: in_proj [3 hidden, hidden]; attention: q|k|v merged
++    out: Tensor
 +    conv: Tensor | None = None            # (C, 1, taps)
 +    q_norm: Tensor | None = None
 +    k_norm: Tensor | None = None
@@ -783,49 +909,60 @@ index 00000000..f8ce1498
 +    embed: Tensor                          # bf16 [vocab, hidden], also the tied head
 +    norm: Tensor
 +    layers: list[Layer] = field(default_factory=list)
-+    precision: str = "bf16"
-+    _rope: dict = field(default_factory=dict)
 +
 +    @classmethod
-+    def load(cls, model_dir: Path, precision: str = "bf16", device: str = "cuda") -> "Model":
++    def load(cls, model_dir: Path, device: str = "cuda") -> "Model":
++        """The checkpoint's bf16 language weights, moved to the GPU; refused unless the config reads and every
++        tensor the kernels need is present."""
++
 +        from safetensors import safe_open
 +
 +        cfg = Config.read(model_dir)
 +        files = sorted(model_dir.glob("*.safetensors"))
++        split = [path.name for path in files if ".rank" in path.name]
++        if split:
++            raise ValueError(f"this checkpoint holds another rank's split weights ({split[0]}); use the complete "
++                             "checkpoint folder")
 +        tensors: dict[str, Tensor] = {}
 +        for path in files:
 +            with safe_open(str(path), "pt", device="cpu") as f:
 +                for key in f.keys():
 +                    if key.startswith(("model.language_model.", "model.layers.", "model.embed", "model.embedding")):
 +                        tensors[key] = f.get_tensor(key)
++        if not tensors:
++            raise ValueError(f"no language-model tensors in {model_dir} (a complete d1 checkpoint is needed)")
 +        pre = "model.language_model." if any(k.startswith("model.language_model.") for k in tensors) else "model."
-+        t = lambda name: tensors.pop(pre + name).to(device=device, dtype=torch.bfloat16)  # noqa: E731
-+        make = lambda w: L.make(w, precision)  # noqa: E731
-+        model = cls(cfg, t("embed_tokens.weight"), t("embedding_norm.weight"), precision=precision)
++
++        def take(name: str) -> Tensor:
++            found = tensors.pop(pre + name, None)
++            if found is None:
++                raise ValueError(f"the checkpoint has no {pre}{name}, which an LFM2 forward needs")
++            if found.dtype != torch.bfloat16:      # a stored format the LFM2 kernels do not read, not a cast
++                raise ValueError(f"{pre}{name} is stored as {found.dtype}, and LFM2 d1 reads bf16 weights")
++            return found.to(device=device)
++
++        model = cls(cfg, take("embed_tokens.weight"), take("embedding_norm.weight"))
 +        for i, kind in enumerate(cfg.layers):
 +            base = f"layers.{i}."
-+            up = make(torch.cat((t(base + "feed_forward.w1.weight"), t(base + "feed_forward.w3.weight"))))
-+            down = make(t(base + "feed_forward.w2.weight"))
++            op_norm, ffn_norm = take(base + "operator_norm.weight"), take(base + "ffn_norm.weight")
++            # the MLP's gate (w1) and up (w3) projections are one matrix: the fused SwiGLU reads them together
++            up = torch.cat((take(base + "feed_forward.w1.weight"), take(base + "feed_forward.w3.weight")))
++            down = take(base + "feed_forward.w2.weight")
 +            if kind == "conv":
-+                layer = Layer(kind, t(base + "operator_norm.weight"), t(base + "ffn_norm.weight"), up, down,
-+                              make(t(base + "conv.in_proj.weight")), make(t(base + "conv.out_proj.weight")),
-+                              conv=t(base + "conv.conv.weight"))
++                model.layers.append(Layer(kind, op_norm, ffn_norm, up, down, take(base + "conv.in_proj.weight"),
++                                          take(base + "conv.out_proj.weight"), conv=take(base + "conv.conv.weight")))
 +            else:
-+                qkv = torch.cat((t(base + "self_attn.q_proj.weight"), t(base + "self_attn.k_proj.weight"),
-+                                 t(base + "self_attn.v_proj.weight")))
-+                layer = Layer(kind, t(base + "operator_norm.weight"), t(base + "ffn_norm.weight"), up, down,
-+                              make(qkv), make(t(base + "self_attn.out_proj.weight")),
-+                              q_norm=t(base + "self_attn.q_layernorm.weight"),
-+                              k_norm=t(base + "self_attn.k_layernorm.weight"))
-+            model.layers.append(layer)
++                qkv = torch.cat((take(base + "self_attn.q_proj.weight"), take(base + "self_attn.k_proj.weight"),
++                                 take(base + "self_attn.v_proj.weight")))
++                model.layers.append(Layer(kind, op_norm, ffn_norm, up, down, qkv,
++                                          take(base + "self_attn.out_proj.weight"),
++                                          q_norm=take(base + "self_attn.q_layernorm.weight"),
++                                          k_norm=take(base + "self_attn.k_layernorm.weight")))
++        if tensors:
++            raise ValueError(f"{len(tensors)} language tensor(s) the LFM2 kernels do not read: "
++                             f"{', '.join(sorted(tensors)[:4])}")
 +        torch.cuda.empty_cache()
 +        return model
-+
-+    def nbytes(self) -> int:
-+        n = self.embed.numel() * 2 + self.norm.numel() * 2
-+        for layer in self.layers:
-+            n += sum(lin.nbytes() for lin in (layer.up, layer.down, layer.proj, layer.out))
-+        return n
 +
 +    def _cos_sin(self, positions: Tensor) -> tuple[Tensor, Tensor]:
 +        """fp32 ``(T, head_dim)`` cos and sin of half-split RoPE."""
@@ -847,16 +984,16 @@ index 00000000..f8ce1498
 +        h, x = fused.add_rms(embeds, None, self.layers[0].op_norm, c.eps)
 +        for i, layer in enumerate(self.layers):
 +            if layer.kind == "conv":
-+                y = layer.out(fused.short_conv(layer.proj(x), layer.conv, tree.prev))
++                y = F.linear(fused.short_conv(F.linear(x, layer.proj), layer.conv, tree.prev), layer.out)
 +            else:
-+                qkv = layer.proj(x)
++                qkv = F.linear(x, layer.proj)
 +                q, k = fused.qk_norm_rope(qkv, layer.q_norm, layer.k_norm, cos, sin, c.heads, c.kv_heads,
 +                                          c.head_dim, c.eps)
 +                v = qkv[:, hq + hk:].view(-1, c.kv_heads, c.head_dim)
 +                a = attention(q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1).contiguous(), tree, scale)
-+                y = layer.out(a.transpose(0, 1).reshape(-1, hq).contiguous())
++                y = F.linear(a.transpose(0, 1).reshape(-1, hq).contiguous(), layer.out)
 +            h, x = fused.add_rms(h, y, layer.ffn_norm, c.eps)
-+            d = layer.down(fused.silu_mul(layer.up(x)))
++            d = F.linear(fused.silu_mul(F.linear(x, layer.up)), layer.down)
 +            if i + 1 < len(self.layers):
 +                h, x = fused.add_rms(h, d, self.layers[i + 1].op_norm, c.eps)
 +        return fused.add_rms(h[tree.leaves], d[tree.leaves], self.norm, c.eps)[1]
@@ -868,66 +1005,10 @@ index 00000000..f8ce1498
 +
 +    def embed_ids(self, ids: list[int]) -> Tensor:
 +        return self.embed[torch.tensor(ids, device=self.embed.device)]
-+
-+
-+class RowGraphs:
-+    """CUDA graphs for one-row decisions (one question, no pictures), one per padded length.
-+
-+    A row is right-padded to its bucket: every operator is causal, so the padding never reaches the answer slot,
-+    and the answer is read at the row's real last token. TensorFold's lane matmuls fix a row's bits regardless of
-+    how many rows run with it, so a padded row reads exactly what it reads alone on the quantized precisions.
-+    """
-+
-+    BUCKETS = (32, 48, 64, 80, 96, 128, 160, 192, 224)
-+
-+    def __init__(self, model: "Model", pad_id: int = 0):
-+        self.model, self.pad = model, pad_id
-+        self.dev = model.embed.device
-+        self.pool = torch.cuda.graph_pool_handle()
-+        self.graphs: dict[int, tuple] = {}
-+        self.stream = torch.cuda.Stream()
-+
-+    def bucket(self, n: int) -> int | None:
-+        return next((b for b in self.BUCKETS if b >= n), None)
-+
-+    @torch.inference_mode()
-+    def _capture(self, b: int):
-+        ids = torch.full((b,), self.pad, dtype=torch.long, device=self.dev)
-+        leaf = torch.zeros(1, dtype=torch.long, device=self.dev)
-+        tree = Tree(0, [b], self.dev, self.model.cfg.taps)
-+        tree.leaves = leaf
-+        torch.cuda.synchronize()
-+        with torch.cuda.stream(self.stream):
-+            for _ in range(2):                             # warm the kernels outside the capture
-+                self.model.forward(self.model.embed[ids], tree)
-+        torch.cuda.synchronize()
-+        g = torch.cuda.CUDAGraph()
-+        with torch.cuda.graph(g, pool=self.pool, stream=self.stream):
-+            out = self.model.forward(self.model.embed[ids], tree)
-+        self.graphs[b] = (g, ids, leaf, out, tree)     # the tree's indices must outlive the graph
-+
-+    @torch.inference_mode()
-+    def run(self, row: list[int]) -> Tensor:
-+        b = self.bucket(len(row))
-+        if b not in self.graphs:
-+            self._capture(b)
-+        g, ids, leaf, out, _ = self.graphs[b]
-+        host = torch.tensor(row + [self.pad] * (b - len(row)) + [len(row) - 1], dtype=torch.long).pin_memory()
-+        dev = host.to(self.dev, non_blocking=True)
-+        ids.copy_(dev[:b])
-+        leaf.copy_(dev[b:])
-+        g.replay()
-+        return out.clone()
-+
-+    def warm(self) -> None:
-+        for b in self.BUCKETS:
-+            self._capture(b)
 diff --git a/tensorfold/families/lfm2/cuda/vision.py b/tensorfold/families/lfm2/cuda/vision.py
-new file mode 100644
-index 00000000..cd894ca7
 --- /dev/null
 +++ b/tensorfold/families/lfm2/cuda/vision.py
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,110 @@
 +"""LFM2-VL pictures: the checkpoint's SigLIP2 NaFlex tower and projector (transformers' modules, bf16), and the
 +processor that tiles a picture and writes its placeholder tokens. A picture's features replace its placeholder
 +tokens' embeddings in the trunk; everything after that is the language model's tree forward."""
@@ -981,6 +1062,12 @@ index 00000000..cd894ca7
 +                    elif key.startswith("model.multi_modal_projector."):
 +                        state_p[key[len("model.multi_modal_projector."):]] = f.get_tensor(key)
 +        wanted = set(tower.state_dict())
++        strange = [(key, value.dtype) for key, value in (*state_t.items(), *state_p.items())
++                   if value.dtype != torch.bfloat16]
++        if strange:
++            raise ValueError(f"{strange[0][0]} is stored as {strange[0][1]}, and the LFM2-VL tower reads bf16 weights")
++        if not state_t:
++            raise ValueError(f"no vision tower tensors in {model_dir}, which its config's vision_config needs")
 +        if not any(k in wanted for k in state_t):          # transformers releases differ in the wrapper prefix
 +            state_t = {k.split("vision_model.", 1)[-1] if k.startswith("vision_model.") else f"vision_model.{k}": v
 +                       for k, v in state_t.items()}
@@ -1004,18 +1091,19 @@ index 00000000..cd894ca7
 +        return self._markup[n]
 +
 +    @torch.inference_mode()
-+    def trunk(self, model, fmt, state, images, suffix: str = "") -> tuple[list[int], torch.Tensor]:
-+        """Token ids of the prefix (and ``suffix``, when given) with the pictures expanded, and their embeddings
-+        with the pictures' features in their placeholder slots."""
++    def trunk(self, model, fmt, state, images) -> tuple[list[int], torch.Tensor]:
++        """Token ids of the state's prefix with the pictures expanded (the questions' suffixes follow it as
++        branches), and their embeddings with the pictures' features in their placeholder slots."""
 +
 +        pics = [_cap(im) for im in images]
-+        text = fmt.prefix(state, self.markup(len(pics))) + suffix
++        text = fmt.prefix(state, self.markup(len(pics)))
 +        inputs = self.processor(text=[text], images=[pics], return_tensors="pt", add_special_tokens=False)
 +        ids = inputs["input_ids"][0]
 +        pv, mask = inputs["pixel_values"], inputs["pixel_attention_mask"]
 +        n = int(mask.sum(1).max())           # every picture is padded to the patch budget; the tower masks it
 +        pv, mask = pv[:, :n], mask[:, :n]
-+        out = self.tower(pixel_values=pv.to(self.device, torch.bfloat16), spatial_shapes=inputs["spatial_shapes"].to(self.device),
++        out = self.tower(pixel_values=pv.to(self.device, torch.bfloat16),
++                         spatial_shapes=inputs["spatial_shapes"].to(self.device),
 +                         pixel_attention_mask=mask.to(self.device), return_dict=True).last_hidden_state
 +        lengths = mask.sum(dim=1)
 +        feats = []
@@ -1032,18 +1120,18 @@ index 00000000..cd894ca7
 +        embeds[slots] = features
 +        return ids.tolist(), embeds
 diff --git a/tensorfold/families/lfm2/decisions.py b/tensorfold/families/lfm2/decisions.py
-new file mode 100644
-index 00000000..a8304d81
 --- /dev/null
 +++ b/tensorfold/families/lfm2/decisions.py
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,182 @@
 +"""The d1 decision format: a state and typed questions in, one forward per request, answers read from the
 +logits at the answer slot.
 +
 +Questions follow the Decision Index schema (``type``, ``instructions``, ``criteria``): ``noul`` (yes/no, the
 +answer is P(yes)), ``choice`` (one of named options) and ``score`` (2 to 10 ordered levels, the answer is the
-+expected level). Each option is scored by the best logit among its single-token forms; the answer is a softmax
-+over the options only, so the vocabulary's log-sum-exp never matters and only those rows of the head are read.
++expected level). The prompt pieces are the ones llama-server renders from the checkpoint's own
++``tokenizer.chat_template.systemone``, which is d1's ``prompt.py`` in a template; each option is scored by the
++best logit among its single-token forms; the answer is a softmax over the options only, so the vocabulary's
++log-sum-exp never matters and only those rows of the head are read.
 +"""
 +
 +from __future__ import annotations
@@ -1080,7 +1168,9 @@ index 00000000..a8304d81
 +    if not isinstance(raw, dict):
 +        raise DecisionError("a question is an object with type, instructions and criteria")
 +    kind = raw.get("type", "choice")
-+    instr = _text(raw.get("instructions", ""))
++    if raw.get("instructions") is None:
++        raise DecisionError("a question needs instructions (llama-server's System One requires them)")
++    instr = _text(raw["instructions"])
 +    crit = raw.get("criteria")
 +    if kind == "noul":
 +        if crit is None:
@@ -1142,7 +1232,8 @@ index 00000000..a8304d81
 +        return out
 +
 +    def readout(self, q: Question) -> list[list[int]]:
-+        """Token ids per option; an option scores its best form."""
++        """Token ids per option; an option scores its best form. A question whose tokenizer has none of an
++        option's single-token forms cannot be read at the answer slot and is refused here."""
 +
 +        def forms(texts) -> list[int]:
 +            seen: list[int] = []
@@ -1153,9 +1244,15 @@ index 00000000..a8304d81
 +            return seen
 +
 +        if q.kind == "noul":
-+            return [forms(YES), forms(NO)]
++            groups = [forms(YES), forms(NO)]
++            if not all(groups):
++                raise DecisionError("this tokenizer has no single-token yes/no, which a noul question is read at")
++            return groups
 +        if q.kind == "score":
-+            return [forms((str(i),)) for i in range(len(q.keys))]
++            groups = [forms((str(i),)) for i in range(len(q.keys))]
++            if any(not g for g in groups):
++                raise DecisionError(f"a score with {len(q.keys)} levels needs single-token digits")
++            return groups
 +        groups = []
 +        for code, tid in self.codes(q.keys):
 +            extra = self._one(" " + code)
@@ -1178,10 +1275,14 @@ index 00000000..a8304d81
 +        if q.kind == "choice":
 +            lines = []
 +            for (code, _), key, desc in zip(self.codes(q.keys), q.keys, q.texts):
-+                lines.append(f"{code} {desc if desc else key.replace('_', ' ')}")
++                # a description is shown as written (JSON for anything that is not text); without one, the name
++                lines.append(f"{code} {_text(desc) if desc else key.replace('_', ' ')}")
 +            return f"{q.instructions}\n\nOptions:\n" + "\n".join(lines) + "\n\nReply with the option code only."
 +        if q.kind == "noul":
-+            extra = f"\nYes: {q.texts[0]}\nNo: {q.texts[1]}" if q.keys else ""
++            # the systemone template shows nothing unless one of the two sides has a description, then both
++            shown = [text if text is not None else "None" for text in q.texts]
++            extra = "".join(f"\n{name}: {_text(text)}" for name, text in zip(("Yes", "No"), shown)) \
++                if any(text is not None for text in q.texts) else ""
 +            return f"{q.instructions}{extra}\n\nReply with yes or no only."
 +        legend = "\n".join(f"{i} {name}" for i, name in enumerate(q.keys))
 +        return f"{q.instructions}\n\n{legend}\n\nReply with a single digit 0-{len(q.keys) - 1} only."

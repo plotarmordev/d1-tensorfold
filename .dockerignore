@@ -2,3 +2,5 @@
 !Dockerfile
 !patches/
 !patches/*.patch
+!checksums/
+!checksums/tensorfold-audited.sha256

@@ -1,8 +1,16 @@
 diff --git a/tensorfold/cuda/http.py b/tensorfold/cuda/http.py
-index 1a1dc30c..4993d74f 100644
 --- a/tensorfold/cuda/http.py
 +++ b/tensorfold/cuda/http.py
-@@ -105,7 +105,9 @@ def make_handler(app: App):
+@@ -44,6 +44,8 @@
+ def make_handler(app: App):
+     class Handler(Rearming):              # USR1's stack dump armed again after each request
+         protocol_version = "HTTP/1.1"
++        # Headers and small bodies are separate writes: do not wait for a delayed ACK on a reused connection.
++        disable_nagle_algorithm = True
+ 
+         def log_message(self, fmt, *args):    # one line a request, as the Mac server prints
+             print(f"[tensorfold] {self.address_string()} {fmt % args}", flush=True)
+@@ -105,7 +107,9 @@
          def do_POST(self):
              path = self.path.split("?", 1)[0].rstrip("/")
              if path.endswith("/decisions"):
@@ -13,7 +21,7 @@ index 1a1dc30c..4993d74f 100644
              if anthropic.route(self.path):
                  return anthropic.post(self, app)
              if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
-@@ -244,8 +246,7 @@ def make_handler(app: App):
+@@ -244,8 +248,7 @@
                  payload["stop_sequence"] = result["stop_sequence"]
              self._json(200, payload)
  

@@ -1,0 +1,18 @@
+d1-3B on TensorFold
+Copyright 2026 the d1-tensorfold contributors
+
+This recipe is licensed under the Apache License, Version 2.0 (LICENSE).
+
+It builds on these upstream projects; their packages and model files are downloaded rather than vendored:
+
+- TensorFold (https://github.com/ashhart/TensorFold), Apache License 2.0, Copyright 2026 TensorFold
+  contributors. The image installs it at the commit pinned in scripts/config.sh; patches/ are changes to that
+  commit and are offered under the same license.
+- llama.cpp (https://github.com/ggml-org/llama.cpp), MIT License, Copyright (c) 2023-2026 The ggml authors.
+  The baseline image builds it at the commit pinned in scripts/config.sh.
+- d1-3B and its GGUF files (https://huggingface.co/LiquidAI/d1-3B), LFM Open License v1.0, Liquid AI, Inc.
+  The weights are downloaded from Hugging Face by the scripts and are never part of this repository. The
+  decision prompt format the engine builds follows the model's own prompt.py.
+- The int4 range search follows the idea of llama.cpp's k-quants (make_qkx2_quants), reimplemented.
+- The bench picture is COCO val2017 image 39769 (https://cocodataset.org), fetched at bench time and not
+  redistributed; it keeps its owner's license.

@@ -1,0 +1,7 @@
+# the operator's settings, and what the scripts download or build
+scripts/local.sh
+.env
+data/
+bench/assets/
+results/*.log
+__pycache__/

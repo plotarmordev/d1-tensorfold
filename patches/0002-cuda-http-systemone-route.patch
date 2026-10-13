@@ -1,0 +1,25 @@
+diff --git a/tensorfold/cuda/http.py b/tensorfold/cuda/http.py
+index 1a1dc30c..4993d74f 100644
+--- a/tensorfold/cuda/http.py
++++ b/tensorfold/cuda/http.py
+@@ -105,7 +105,9 @@ def make_handler(app: App):
+         def do_POST(self):
+             path = self.path.split("?", 1)[0].rstrip("/")
+             if path.endswith("/decisions"):
+-                return self._post_decisions()
++                return self._post_decisions(getattr(app, "decisions", None))
++            if path.endswith("/systemone"):              # llama-server's System One API, on engines that decide
++                return self._post_decisions(getattr(app, "systemone", None))
+             if anthropic.route(self.path):
+                 return anthropic.post(self, app)
+             if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
+@@ -244,8 +246,7 @@ def make_handler(app: App):
+                 payload["stop_sequence"] = result["stop_sequence"]
+             self._json(200, payload)
+ 
+-        def _post_decisions(self) -> None:
+-            decide = getattr(app, "decisions", None)
++        def _post_decisions(self, decide) -> None:
+             if decide is None:
+                 self._discard_body()
+                 return self._json(404, {"error": {"message": f"unknown path {self.path}",

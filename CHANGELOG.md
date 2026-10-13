@@ -1,0 +1,17 @@
+# Changelog
+
+## 2026-10-13
+
+- Added single-GB10 deployment of LiquidAI/d1-3B through TensorFold's Python 0.6 engine, as three source patches.
+- Implemented the System One HTTP API, BF16 vision, typed question scoring and zero-token responses.
+- Added shared-prefix tree execution, queued request packing, a sparse option-token head, short-request CUDA
+  graphs, fused Triton operations, and BF16 / block-FP8 / affine INT4 projection modes.
+- Added per-sequence and packed-forward bounds; serialized generic decision scoring with the worker. Generic
+  decisions compute full-vocabulary mass rather than treating the label-only normalizer as vocabulary mass.
+- Added digest-pinned base image, source and model pins, model checksums, content-addressed image builds,
+  user-owned kernel caches, launch memory preflight and explicit start/stop scripts.
+- Added a pinned llama.cpp baseline, deterministic text/image workloads, all raw warm samples, probability
+  parity against the model's own implementation, and report generation.
+- Removed experimental NVFP4 and generic INT8 modes after speed/quality evaluation. INT4 is lossy; its selected
+  quantizer was tuned on the included development corpus. Quantized comparisons are not format-identical.
+- Model weights, downloaded benchmark pictures and local machine settings are not redistributed.

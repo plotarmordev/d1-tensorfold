@@ -1,0 +1,117 @@
+{
+  "recorded_utc": "2026-10-13T09:05:44Z",
+  "hardware": {
+    "gpu": "NVIDIA GB10",
+    "compute_capability": "12.1",
+    "architecture": "aarch64",
+    "driver": "580.173.02",
+    "kernel": "6.17.0-1029-nvidia"
+  },
+  "base_image": "nvcr.io/nvidia/pytorch@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c",
+  "runtime": {
+    "python_packages": {
+      "torch": "2.13.0a0+9186a08b2c.nv26.7.59513937",
+      "torchvision": "0.28.0a0+85a1dccc.nv26.7.59513937",
+      "triton": "3.7.1+gitf797708c.nv26.7",
+      "transformers": "5.19.0",
+      "huggingface-hub": "1.33.0",
+      "tokenizers": "0.23.1",
+      "safetensors": "0.8.0",
+      "pillow": "12.3.0",
+      "jinja2": "3.1.6",
+      "numpy": "2.1.0"
+    },
+    "cuda_toolkit": "13.3"
+  },
+  "sources": {
+    "tensorfold_base": "ed78d6fc204d89d90b045bf033d6551e7714f3a1",
+    "tensorfold_local_head": "cf192a9cb27d045000922fd6863d04c87767770e",
+    "llamacpp": "4413a192410fad1f054e9216114087a3e01527a0",
+    "model": "051bcc464b01b9f92942b364d9586b0ef5912432",
+    "gguf": "bb1e436ea78eb96a3f1acb6da865f70c2fbeb563"
+  },
+  "images": {
+    "tensorfold": {
+      "tag": "d1-tensorfold:7f1a0cf18ba1",
+      "id": "sha256:1bc5f967e531d55eb037bcf7004ed0f2138abd7551f180e726507b6daa99e25e"
+    },
+    "llamacpp": {
+      "tag": "d1-llamacpp:f185f245ca99",
+      "id": "sha256:063ccd1af9edbdfe426389f08dc785d019781632072d97d3f65c1776dae54452"
+    }
+  },
+  "corpus": {
+    "collector_sha256": "9250c62af21396a13a1a4bb5a4c7f3a6f8b3e15e1e6adb18a5c09698a172252f",
+    "workloads_sha256": "e35b23d4d1e60c96beb4f8dddf50e1a2ef7e9784ece692ee7bad53d655e12c58",
+    "image_sha256": "09b416b56972a9a46651e559cde81ff77fe64248dd9f85c789a798604a28982e",
+    "tokenizer_sha256": "8096ecb9f54599d756c8de728a598a340bc1e43c0deb77ddd62456c38349fcee"
+  },
+  "measurements": {
+    "labels": [
+      "llamacpp-BF16",
+      "llamacpp-Q8_0",
+      "llamacpp-Q4_K_M",
+      "tensorfold-bf16",
+      "tensorfold-fp8",
+      "tensorfold-int4"
+    ],
+    "raw_timing_samples": 3690,
+    "latency_samples_per_cell": 150,
+    "packed_bursts_per_mode": 15,
+    "parity_questions": 99,
+    "packed_parity_questions": 64,
+    "reference_image_id": "sha256:53738b4e560d76c8f2696d04639368ab3262a418e86cc63b435dac901d3535d1",
+    "reference_runtime_note": "Same pinned inference package versions; earlier image before server-only fixes."
+  },
+  "bf16_weight_equivalence": {
+    "language_tensors_compared": 266,
+    "mismatches": 0,
+    "method": "Map GGUF language tensors to safetensors names; decode GGUF, cast source to BF16 then FP32, require equal shapes and numpy.array_equal for every value. All source language tensor names covered.",
+    "vision_conversion_independently_audited": false
+  },
+  "verification": {
+    "focused_tensorfold_tests": {
+      "passed": 162,
+      "skipped": 2
+    },
+    "recipe_integrity_tests": {
+      "passed": 4
+    },
+    "http_smoke": "16 concurrent System One/generic decisions succeeded with finite full-vocabulary mass; oversized single/multi-question requests rejected; generation refused; server still served valid requests afterward.",
+    "broader_tests": "A selected 46-file run had the same 67 failing test IDs on upstream base and branch. Not an all-green suite; optional MLX unavailable.",
+    "full_ci_green": false
+  },
+  "limitations": [
+    "One device; no cross-GPU qualification.",
+    "Another inference service stayed resident; external activity was not traced.",
+    "Sequential runs, not A/B/A bookends.",
+    "INT4 range search selected on this development corpus; no held-out task accuracy claim.",
+    "Peak memory not measured.",
+    "One baseline launch failed during CUDA context creation before loading weights despite MemAvailable preflight. Closed checkpoint pages were advised DONTNEED; missing runs then completed. No global cache drop, GPU reset or unrelated service stop.",
+    "Earlier aggregate-only runs were excluded; no raw timings were reconstructed from aggregates."
+  ],
+  "artifact_sha256": {
+    "bench/assets.py": "45bccd23e416f5901f0676d056593f9de6abf88ef1ecddb0801e3fab99b02a61",
+    "bench/parity.py": "47e560a8dbd01e6bcb88bdcce462470dca40609c1bd3c136c8d4f109bef83037",
+    "bench/report.py": "65f5ccb255ba7c047b91042c566c49dbee189972730923be6f00dd5ec5074172",
+    "checksums/d1-3B-GGUF.sha256": "fa6c5699a78b6104e27f5ce74587436700663624ca095dfb6b3ec9fe5c9fcb78",
+    "checksums/d1-3B.sha256": "ad408b4abb8ef60ca00191fa972bdaec193da50e2769c39b3ef0b5c59f4865d4",
+    "patches/0001-cuda-chat-template-generation-tag.patch": "07687c127af99e481ca43d31a5dd7f0206ad32d1fb8f1145f2a3793463630914",
+    "patches/0002-cuda-http-systemone-route.patch": "40ed06b2176f043c4560bf45372d406dfeaba40a0f3fdf9fcd419f727f94d4fe",
+    "patches/0003-lfm2-d1-family.patch": "8c7e2821b8c6ec1bd36eb858932b3829a7970b0280a2292628ba6359d9304eb3",
+    "results/example-response.json": "c06c32b9055a3dbb1ce1070d9b2780e1e465728ac081fdd98046b531d932c922",
+    "results/llamacpp-BF16.json": "9fde2cebb09185e148a9c30b8419ccb5e5148aa5545a34bf56887485f7e48e42",
+    "results/llamacpp-Q4_K_M.json": "1a14a1f9fc4f96d52ebfb5358c077f575e8015c19b4183177d35abdadcb2159a",
+    "results/llamacpp-Q8_0.json": "906b19ba313f6b900eed41991f8620b04ebf86c1ee64c4f2e2d8507da416b9e8",
+    "results/parity-llamacpp-BF16.json": "7347f4bf7bcfd6ebaa98a5856590a874b1d31071e064e5c25deb81b7482d9164",
+    "results/parity-llamacpp-Q4_K_M.json": "28bf0d3e08cdae9714a51f029cce2839c9aa8aaaa6feeb79059ccff9b740f703",
+    "results/parity-llamacpp-Q8_0.json": "99fb0b627a1df8a86e664f68076de0fa659c1ca0cb72eaeb527b658215e832e2",
+    "results/parity-tensorfold-bf16.json": "fb261dff20d9bbafc143cd6ce6badf4f9cb20ff7f9d8f8c584abca1f2ecf9828",
+    "results/parity-tensorfold-fp8.json": "ff2bb62be545be3b1a500a37f0a2c21dcca1f1104aef532fa7936d325dd3a9e4",
+    "results/parity-tensorfold-int4.json": "7d0e445935ea6ded5195f200ae5323674d3ad5d00fc786597d6b312b486788a9",
+    "results/reference.json": "5e66260e14cf9048f969a9ebf45a8a3ba04e50758951033438ef021836932fcf",
+    "results/tensorfold-bf16.json": "9fa3aed02784b036e3985c6d47af7e93a418127e40af0365c410f26292ddff90",
+    "results/tensorfold-fp8.json": "f146e1abe1cdd9ed3e0685f405635b25fd20a206aa2f264131aa2a1834bd0c28",
+    "results/tensorfold-int4.json": "d717f5e04ee6f4edcfa828a3ab8ae8c080a1e41480a0b8382af8d54b970905da"
+  }
+}

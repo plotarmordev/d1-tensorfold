@@ -1,0 +1,908 @@
+[
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9751206643934562,
+   "probabilities": {
+    "billing": 0.012682083314372868,
+    "technical": 0.9751206643934562,
+    "fraud": 0.012197252292170835
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.24463640899794276
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.8289612349311898,
+   "confidence": 0.4072166182277239,
+   "probabilities": {
+    "0": 0.38191107342054315,
+    "1": 0.4072166182277239,
+    "2": 0.21087230835173293
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.04805608334342188
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.8679837556221002,
+   "confidence": 0.4808354439084857,
+   "probabilities": {
+    "0": 0.3255904002347071,
+    "1": 0.4808354439084857,
+    "2": 0.19357415585680723
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.3492205696080927
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 0.24723313546103445,
+   "confidence": 0.792539407563385,
+   "probabilities": {
+    "0": 0.792539407563385,
+    "1": 0.1676880494121953,
+    "2": 0.03977254302441957
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.089105351763955
+  }
+ },
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.7550470735807738,
+   "probabilities": {
+    "billing": 0.03618817130456041,
+    "technical": 0.7550470735807738,
+    "fraud": 0.20876475511466583
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.28914230322748513
+  },
+  "q2": {
+   "type": "score",
+   "score": 1.0819933473970706,
+   "confidence": 0.3784348425939915,
+   "probabilities": {
+    "0": 0.2964414951969208,
+    "1": 0.32512366220908767,
+    "2": 0.3784348425939915
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.9144234279064523,
+   "probabilities": {
+    "billing": 0.9144234279064523,
+    "technical": 0.08103594764553249,
+    "fraud": 0.00454062444801535
+   }
+  }
+ },
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9869204273010717,
+   "probabilities": {
+    "billing": 0.006984598127475107,
+    "technical": 0.9869204273010717,
+    "fraud": 0.0060949745714532
+   }
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.06244740732801391
+  }
+ },
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.9662579955246647,
+   "probabilities": {
+    "billing": 0.9662579955246647,
+    "technical": 0.026178114003473144,
+    "fraud": 0.007563890471862215
+   }
+  },
+  "q2": {
+   "type": "score",
+   "score": 1.0388098806931818,
+   "confidence": 0.9533949626734212,
+   "probabilities": {
+    "0": 0.003897578316698419,
+    "1": 0.9533949626734212,
+    "2": 0.04270745900988031
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.4738141490468232
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.015111356105463276
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.7020181533845147,
+   "confidence": 0.5083849905603071,
+   "probabilities": {
+    "0": 0.5083849905603071,
+    "1": 0.2812118654948712,
+    "2": 0.2104031439448217
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.5837053848801246
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.015314923733516552
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.06288805338261699
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.8678674065630398,
+   "probabilities": {
+    "billing": 0.11625033645256873,
+    "technical": 0.8678674065630398,
+    "fraud": 0.01588225698439146
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.3616907731887277
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.8048402727857673,
+   "confidence": 0.4363074406096222,
+   "probabilities": {
+    "0": 0.4363074406096222,
+    "1": 0.3225448459949885,
+    "2": 0.2411477133953894
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.5247443074574176
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.8707068127155068,
+   "confidence": 0.4485200040710646,
+   "probabilities": {
+    "0": 0.34038659160671436,
+    "1": 0.4485200040710646,
+    "2": 0.21109340432222107
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.2030465400862484
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.018080037249242648
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9804223790644361,
+   "probabilities": {
+    "billing": 0.012098497224259111,
+    "technical": 0.9804223790644361,
+    "fraud": 0.0074791237113049315
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.035077772810638806
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.5485398247854647
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 0.7278689842528949,
+   "confidence": 0.4352010301098964,
+   "probabilities": {
+    "0": 0.4352010301098964,
+    "1": 0.4017289555273121,
+    "2": 0.16307001436279142
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.7041021240503783
+  },
+  "q2": {
+   "type": "score",
+   "score": 1.257972382824963,
+   "confidence": 0.5117605603153002,
+   "probabilities": {
+    "0": 0.2537881774903371,
+    "1": 0.2344512621943627,
+    "2": 0.5117605603153002
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9603371137067497,
+   "probabilities": {
+    "billing": 0.012519388320608355,
+    "technical": 0.9603371137067497,
+    "fraud": 0.027143497972641963
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.6587906064148777
+  },
+  "q2": {
+   "type": "score",
+   "score": 1.2051292436645913,
+   "confidence": 0.7817169451515156,
+   "probabilities": {
+    "0": 0.00657690559194647,
+    "1": 0.7817169451515156,
+    "2": 0.21170614925653788
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.6946373612804786
+  },
+  "q2": {
+   "type": "score",
+   "score": 1.1700957054090981,
+   "confidence": 0.45723741828270575,
+   "probabilities": {
+    "0": 0.18633343815409797,
+    "1": 0.45723741828270575,
+    "2": 0.3564291435631962
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 1.1491790172704126,
+   "confidence": 0.3983458269639418,
+   "probabilities": {
+    "0": 0.22623757788282284,
+    "1": 0.3983458269639418,
+    "2": 0.37541659515323544
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.20901806992642263
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.8011655798564453,
+   "probabilities": {
+    "billing": 0.8011655798564453,
+    "technical": 0.18664422018285562,
+    "fraud": 0.0121901999606991
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.7506173860703154
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 1.10021172293304,
+   "confidence": 0.4496458248614356,
+   "probabilities": {
+    "0": 0.22507122610276228,
+    "1": 0.4496458248614356,
+    "2": 0.3252829490358022
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.4540569985795905
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.01504329334621127
+  }
+ },
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.9561928172464159,
+   "probabilities": {
+    "billing": 0.9561928172464159,
+    "technical": 0.03565126217369792,
+    "fraud": 0.008155920579886221
+   }
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.9355963635241276,
+   "confidence": 0.5897045124591771,
+   "probabilities": {
+    "0": 0.23734956200834767,
+    "1": 0.5897045124591771,
+    "2": 0.1729459255324752
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.5677685787667353
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.020570707306320626
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.6706689471158914
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.7911297865188169
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.6828394005487707
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.02107244372403568
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9733793893715367,
+   "probabilities": {
+    "billing": 0.017238388456357976,
+    "technical": 0.9733793893715367,
+    "fraud": 0.009382222172105327
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.9272943981689991
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.06793660052707652
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.9357945292445313,
+   "probabilities": {
+    "billing": 0.9357945292445313,
+    "technical": 0.049369347700415775,
+    "fraud": 0.01483612305505296
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.028960937793820998
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.14538555462320346
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.9829205820019354,
+   "probabilities": {
+    "billing": 0.9829205820019354,
+    "technical": 0.011815694175401476,
+    "fraud": 0.0052637238226631135
+   }
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.841295518220091,
+   "confidence": 0.5173451831210122,
+   "probabilities": {
+    "0": 0.3206796493294484,
+    "1": 0.5173451831210122,
+    "2": 0.16197516754953942
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 0.7883203894074502,
+   "confidence": 0.4357828858850003,
+   "probabilities": {
+    "0": 0.4357828858850003,
+    "1": 0.34011383882254914,
+    "2": 0.22410327529245055
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.8113883807167426
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.04352671036808187
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 1.232103374050161,
+   "confidence": 0.7451208678370643,
+   "probabilities": {
+    "0": 0.011387879056387232,
+    "1": 0.7451208678370643,
+    "2": 0.24349125310654834
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.024013869459166587
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.07704841044119841
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.5739134982666655
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 1.2176423675301644,
+   "confidence": 0.4329040028669806,
+   "probabilities": {
+    "0": 0.21526163533681625,
+    "1": 0.35183436179620314,
+    "2": 0.4329040028669806
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.021512231057142738
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.016087794382316955
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9526164898830054,
+   "probabilities": {
+    "billing": 0.029169750453331613,
+    "technical": 0.9526164898830054,
+    "fraud": 0.018213759663662954
+   }
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.8673920852741551,
+   "confidence": 0.4140108692212005,
+   "probabilities": {
+    "0": 0.4140108692212005,
+    "1": 0.3045861762834441,
+    "2": 0.2814029544953555
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.9667505776673169,
+   "probabilities": {
+    "billing": 0.9667505776673169,
+    "technical": 0.026380221380936486,
+    "fraud": 0.006869200951746552
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.8658436466686648
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.828354906205166
+  },
+  "q2": {
+   "type": "score",
+   "score": 1.0783825661378572,
+   "confidence": 0.4906350666862776,
+   "probabilities": {
+    "0": 0.21549118358793268,
+    "1": 0.4906350666862776,
+    "2": 0.29387374972578983
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q0": {
+   "type": "noul",
+   "noul": 0.04297509958265782
+  },
+  "q2": {
+   "type": "score",
+   "score": 0.7002836307953777,
+   "confidence": 0.46457234526138913,
+   "probabilities": {
+    "0": 0.46457234526138913,
+    "1": 0.3705716786818442,
+    "2": 0.16485597605676677
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 1.0967538983366478,
+   "confidence": 0.8920269815576586,
+   "probabilities": {
+    "0": 0.005609560052846943,
+    "1": 0.8920269815576586,
+    "2": 0.10236345838949458
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.7878155981054926,
+   "probabilities": {
+    "billing": 0.19817801789082765,
+    "technical": 0.7878155981054926,
+    "fraud": 0.014006384003679805
+   }
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.07711666268015374
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.1361130995227949
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.4852674122186472,
+   "probabilities": {
+    "billing": 0.4852674122186472,
+    "technical": 0.2041271010629547,
+    "fraud": 0.31060548671839816
+   }
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 0.8494292992627914,
+   "confidence": 0.3891932700447262,
+   "probabilities": {
+    "0": 0.3891932700447262,
+    "1": 0.37218416064775617,
+    "2": 0.23862256930751763
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.5722624979738804
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "billing",
+   "confidence": 0.6547253074534668,
+   "probabilities": {
+    "billing": 0.6547253074534668,
+    "technical": 0.16310928991315887,
+    "fraud": 0.18216540263337427
+   }
+  }
+ },
+ {
+  "q3": {
+   "type": "noul",
+   "noul": 0.17580240037563852
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 0.8825599968469593,
+   "confidence": 0.3729182401541596,
+   "probabilities": {
+    "0": 0.3722608814994405,
+    "1": 0.3729182401541596,
+    "2": 0.2548208783463999
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.057643534346697
+  },
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.5609106665499525,
+   "probabilities": {
+    "billing": 0.24946152507236874,
+    "technical": 0.5609106665499525,
+    "fraud": 0.18962780837767876
+   }
+  }
+ },
+ {
+  "q1": {
+   "type": "choice",
+   "choice": "technical",
+   "confidence": 0.9393070219190935,
+   "probabilities": {
+    "billing": 0.021760974554255394,
+    "technical": 0.9393070219190935,
+    "fraud": 0.03893200352665113
+   }
+  },
+  "q0": {
+   "type": "noul",
+   "noul": 0.014898103601251392
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.5608935138097692
+  }
+ },
+ {
+  "q2": {
+   "type": "score",
+   "score": 1.0509007459934339,
+   "confidence": 0.9376597807579853,
+   "probabilities": {
+    "0": 0.005719736624290486,
+    "1": 0.9376597807579853,
+    "2": 0.05662048261772428
+   },
+   "legend": {
+    "0": "Can wait",
+    "1": "Today",
+    "2": "Blocking the customer now"
+   }
+  },
+  "q3": {
+   "type": "noul",
+   "noul": 0.408917874475842
+  }
+ },
+ {
+  "cats": {
+   "type": "choice",
+   "choice": "two",
+   "confidence": 0.9849220914447767,
+   "probabilities": {
+    "one": 0.0058148541718991194,
+    "two": 0.9849220914447767,
+    "more": 0.009263054383324133
+   }
+  }
+ }
+]

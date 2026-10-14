@@ -347,21 +347,24 @@ fn features(r: *Rig, model: []const u8) !void {
     defer v.deinit();
     const urls = (try json(r.a, io, "zig/tests/fixtures/lfm2/images.json")).object.get("cases").?.array.items;
     const golden = (try json(r.a, io, "zig/tests/fixtures/lfm2/vision.json")).object.get("cases").?.array.items;
-    for (golden) |case| {
+    const pics = try r.a.alloc(lfm2.image.Picture, golden.len);
+    const outs = try r.a.alloc([]u16, golden.len);
+    for (golden, 0..) |case, ci| {
         const name = case.object.get("name").?.string;
         const url = for (urls) |u| {
             if (std.mem.eql(u8, u.object.get("name").?.string, name)) break u.object.get("url").?.string;
         } else return error.MissingField;
         var rgb = (try lfm2.image.load(r.a, url, &problem)) orelse return error.TestFailed;
         defer rgb.deinit(r.a);
-        var pic = try lfm2.image.prepare(r.a, rgb);
-        defer pic.deinit(r.a);
+        const pic = &pics[ci];
+        pic.* = try lfm2.image.prepare(r.a, rgb);
         const rows: usize = @intCast(case.object.get("rows").?.integer);
         const width = cfg.hidden;
         const outd = try r.zeros(u16, rows * width);
-        const got_rows = try v.features(r.s, &pic, outd);
+        const got_rows = try v.features(r.s, pic, outd);
         try check.expect(got_rows == rows, "lfm2-vision {s}: {d} feature rows, the golden has {d}", .{ name, got_rows, rows });
         const got = try r.get(u16, outd, rows * width);
+        outs[ci] = got;
         var nonfinite: usize = 0;
         for (got) |g| nonfinite += @intFromBool(!std.math.isFinite(bf(g)));
         var norm_err = [2]f64{ 0, 0 }; // squared differences, squared golden values
@@ -405,6 +408,20 @@ fn features(r: *Rig, model: []const u8) !void {
         r.cases += 1;
         std.debug.print("RESULT features {s}: {d} tiles, {d} rows, {d} non-finite; relative L2 error of row norms {d:.4}, row sums {d:.4}, picked rows {d:.4}; least picked cosine {d:.5}\n", .{ name, pic.tiles.len, rows, nonfinite, norms, sums, picked, cos_worst });
         if (nonfinite != 0 or !(norms <= norm_tolerance and sums <= sum_tolerance and picked <= row_tolerance and cos_worst >= cos_least)) r.bad += 1;
+    }
+    // all pictures again, queued with no host wait between them: each refills the staging while earlier tiles run
+    var total: usize = 0;
+    for (outs) |o| total += o.len;
+    const all = try r.zeros(u16, total);
+    var at: usize = 0;
+    for (pics, outs) |*pic, o| {
+        _ = try v.features(r.s, pic, all + 2 * at);
+        at += o.len;
+    }
+    at = 0;
+    for (golden, outs) |case, o| {
+        try r.near(try std.fmt.allocPrint(r.a, "features {s} queued back to back", .{case.object.get("name").?.string}), o.len / cfg.hidden, all + 2 * at, o, 0);
+        at += o.len;
     }
 }
 

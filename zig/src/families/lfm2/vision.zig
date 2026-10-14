@@ -160,6 +160,7 @@ pub const Vision = struct {
     position: []f32, // the position table [side, side, hidden] on the host, resized for each tile's grid
     scratch: cuda.DeviceBuffer,
     staging: cuda.HostBuffer, // pinned: a picture's bf16 patches, then its tiles' position rows
+    copied: cuda.Event, // recorded after the staging's copies: refilling it waits for them, not for the tower
     b: Buffers,
 
     const Buffers = struct { px: u64, pos: u64, h: u64, x: u64, wide: u64, a: u64, acc: u64 };
@@ -182,6 +183,10 @@ pub const Vision = struct {
         defer gpa.free(table);
         try d.check(d.api.cuMemcpyDtoH_v2(table.ptr, w.position, 2 * table.len), "cuMemcpyDtoH");
         for (position, table) |*p, t| p.* = @bitCast(@as(u32, t) << 16);
+        if (!finite(position)) {
+            std.log.err("the vision tower's position embedding holds a non-finite value, which its resize cannot carry", .{});
+            return error.UnreadableLfm2Checkpoint;
+        }
         const n = patches_most;
         const merged = 4 * c.hidden;
         const staged = [_]usize{ px_bytes, 2 * tiles_most * n * c.hidden };
@@ -203,6 +208,8 @@ pub const Vision = struct {
             p.* = try scratch.at(off);
             off += std.mem.alignForward(usize, sz, 256);
         }
+        var staging = try cuda.HostBuffer.alloc(d, px_bytes + staged[1]);
+        errdefer staging.free();
         return .{
             .c = c,
             .text_hidden = cfg.hidden,
@@ -212,12 +219,14 @@ pub const Vision = struct {
             .g = g,
             .position = position,
             .scratch = scratch,
-            .staging = try cuda.HostBuffer.alloc(d, px_bytes + staged[1]),
+            .staging = staging,
+            .copied = try cuda.Event.init(d, false),
             .b = .{ .px = at[0], .pos = at[1], .h = at[2], .x = at[3], .wide = at[4], .a = at[5], .acc = at[6] },
         };
     }
 
     pub fn deinit(v: *Vision) void {
+        v.copied.deinit();
         v.staging.free();
         v.scratch.free();
         v.g.gpa.free(v.position);
@@ -235,7 +244,7 @@ pub const Vision = struct {
             if (t.h * t.w > patches_most or t.h % 2 != 0 or t.w % 2 != 0) return error.TileShape;
             n += t.h * t.w;
         }
-        try s.synchronize(); // the staging rows may still feed the last picture's copies
+        try v.copied.synchronize(); // the staging may still feed the last picture's copies, never its tiles' work
         const host = v.staging.slice(u16);
         const px = host[0 .. n * image.patch_width];
         for (px, picture.patches[0..px.len]) |*o, p| o.* = bf16(p);
@@ -247,7 +256,9 @@ pub const Vision = struct {
             at += t.h * t.w;
         }
         try v.scratch.uploadAsync(v.b.px - v.scratch.ptr, std.mem.sliceAsBytes(px), s.handle);
+        errdefer s.synchronize() catch {}; // unrecorded copies may still read the staging the next call refills
         try v.scratch.uploadAsync(v.b.pos - v.scratch.ptr, std.mem.sliceAsBytes(pos), s.handle);
+        try v.copied.record(s);
         var row: usize = 0;
         at = 0;
         for (picture.tiles) |t| {
@@ -306,6 +317,21 @@ fn bf16(x: f32) u16 {
     return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
+/// Every value finite: the resize skips zero weights, so a NaN or infinity there must not be dropped silently.
+fn finite(values: []const f32) bool {
+    for (values) |x| if (!std.math.isFinite(x)) return false;
+    return true;
+}
+
+test "a position table with a NaN or an infinity is refused" {
+    var table = [_]f32{ 0.5, -1.0, 0.0, 3.0 };
+    try std.testing.expect(finite(&table));
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |bad| {
+        table[2] = bad;
+        try std.testing.expect(!finite(&table));
+    }
+}
+
 /// torch's antialiased bilinear weights from `from` samples to `to` (align_corners false), [to][from].
 fn weights(a: Allocator, from: usize, to: usize) ![]f64 {
     const out = try a.alloc(f64, to * from);
@@ -330,29 +356,31 @@ fn weights(a: Allocator, from: usize, to: usize) ![]f64 {
     return out;
 }
 
-/// F.interpolate(bilinear, align_corners=False, antialias=True) of a [side, side, c] table to [h, w, c].
+/// F.interpolate(bilinear, antialias) [side, side, c] -> [h, w, c]: a column at a time, zero weights skipped.
 fn resize(a: Allocator, table: []const f32, side: usize, c: usize, h: usize, w: usize, out: []f32) !void {
     const wy = try weights(a, side, h);
     defer a.free(wy);
     const wx = try weights(a, side, w);
     defer a.free(wx);
-    const across = try a.alloc(f64, side * w * c);
+    const across = try a.alloc(f64, side * c);
     defer a.free(across);
-    @memset(across, 0);
-    for (0..side) |i| for (0..w) |x| for (0..side) |j| {
-        const f = wx[x * side + j];
-        for (across[(i * w + x) * c ..][0..c], table[(i * side + j) * c ..][0..c]) |*o, v| o.* += f * v;
-    };
     const sum = try a.alloc(f64, c);
     defer a.free(sum);
-    for (0..h) |y| for (0..w) |x| {
-        @memset(sum, 0);
-        for (0..side) |i| {
-            const f = wy[y * side + i];
-            for (sum, across[(i * w + x) * c ..][0..c]) |*o, v| o.* += f * v;
+    for (0..w) |x| {
+        @memset(across, 0);
+        for (0..side) |i| for (wx[x * side ..][0..side], 0..) |f, j| {
+            if (f == 0) continue;
+            for (across[i * c ..][0..c], table[(i * side + j) * c ..][0..c]) |*o, v| o.* += f * v;
+        };
+        for (0..h) |y| {
+            @memset(sum, 0);
+            for (wy[y * side ..][0..side], 0..) |f, i| {
+                if (f == 0) continue;
+                for (sum, across[i * c ..][0..c]) |*o, v| o.* += f * v;
+            }
+            for (out[(y * w + x) * c ..][0..c], sum) |*o, v| o.* = @floatCast(v);
         }
-        for (out[(y * w + x) * c ..][0..c], sum) |*o, v| o.* = @floatCast(v);
-    };
+    }
 }
 
 test "position rows resize as torch's antialiased bilinear interpolate" {
@@ -376,5 +404,34 @@ test "position rows resize as torch's antialiased bilinear interpolate" {
         defer a.free(out);
         try resize(a, &table, side, c, case.h, case.w, out);
         for (case.picks) |p| try std.testing.expectApproxEqAbs(p.v, out[(p.y * case.w + p.x) * c + p.k], 1e-6);
+    }
+}
+
+test "position rows: a column at a time, zero weights skipped, bit for bit as every weight in row-major passes" {
+    const a = std.testing.allocator;
+    const side = 16;
+    const c = 40;
+    var prng = std.Random.DefaultPrng.init(11);
+    const table = try a.alloc(f32, side * side * c);
+    defer a.free(table);
+    for (table) |*t| t.* = prng.random().floatNorm(f32) * 0.03;
+    for ([_][2]usize{ .{ 32, 32 }, .{ 26, 38 }, .{ 22, 14 }, .{ 8, 34 }, .{ 4, 100 }, .{ 16, 16 }, .{ 2, 50 }, .{ 50, 2 } }) |g| {
+        const h, const w = g;
+        const got = try a.alloc(f32, h * w * c);
+        defer a.free(got);
+        try resize(a, table, side, c, h, w, got);
+        const wy = try weights(a, side, h);
+        defer a.free(wy);
+        const wx = try weights(a, side, w);
+        defer a.free(wx);
+        for (0..h) |y| for (0..w) |x| for (0..c) |k| {
+            var sum: f64 = 0;
+            for (0..side) |i| {
+                var across: f64 = 0;
+                for (0..side) |j| across += wx[x * side + j] * table[(i * side + j) * c + k];
+                sum += wy[y * side + i] * across;
+            }
+            try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, @floatCast(sum)))), @as(u32, @bitCast(got[(y * w + x) * c + k])));
+        };
     }
 }

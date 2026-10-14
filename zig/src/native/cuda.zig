@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const lfm2 = @import("lfm2.zig");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
@@ -22,8 +23,9 @@ const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
-    var out: [registry.len]api.Family = undefined;
+    var out: [registry.len + 1]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
+    out[registry.len] = lfm2.family;
     const final = out;
     break :blk &final;
 };
@@ -250,6 +252,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
+    if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) return lfm2.open(a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }

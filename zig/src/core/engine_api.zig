@@ -160,6 +160,8 @@ pub const Info = struct {
     plain_only: bool = false,
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
+    /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
+    decides: bool = false,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.

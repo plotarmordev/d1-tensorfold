@@ -178,12 +178,12 @@ pub const Model = struct {
         try m.scratch.downloadAsync(src - m.scratch.ptr, out, m.stream.handle);
     }
 
-    /// The layers over the uploaded rows; leaves each branch's final-normed last row in x.
     /// Where picture features may be written before a pass: free until the first layer, `rows_most` rows.
     pub fn pictureRows(m: *const Model) u64 {
         return m.b.y;
     }
 
+    /// The layers over the uploaded rows; leaves each branch's final-normed last row in x.
     fn forward(m: *Model, trunk: usize, branches: usize, rows: usize, leaves: []const usize, placed: ?Placed) !void {
         const c = m.cfg;
         const s = m.stream;

@@ -187,8 +187,7 @@ const Format = struct {
         return id;
     }
 
-    /// A distinct single-token code per option: single-letter keys as they are, else A, B, ... (00, 01, ... past
-    /// 26), each replaced by the next free single-token code of the pool when it is not one token.
+    /// A distinct single-token code per option: single letters as given, else A.. (00.. past 26), else the pool's next.
     fn codes(f: *Format, keys: []const []const u8) errors.Refused![]const Code {
         const a = f.cx.a;
         var letters = true;

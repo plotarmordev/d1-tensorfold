@@ -53,7 +53,7 @@ const Engine = struct {
         };
     }
 
-    /// Branches packed into passes of at most the window's rows and the model's branch count, as the Python port chunks.
+    /// Branches packed into passes within the window's rows and the model's branch and label counts.
     fn decide(ctx: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{Failed}!void {
         const e = of(ctx);
         e.mutex.lockUncancelable(e.io);

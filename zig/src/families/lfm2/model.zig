@@ -79,8 +79,7 @@ pub const Model = struct {
         m.k.unload();
     }
 
-    /// Each branch's label logits (f32, as model.logits) at its last row, after one pass over trunk ++ branches;
-    /// `labels` and `logits` hold every branch's in branch order (`counts` a branch).
+    /// One pass over trunk ++ branches: each branch's label logits (f32) at its last row, in branch order.
     pub fn decide(m: *Model, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) !void {
         const rows = try m.upload(trunk, branches, labels);
         var leaves: [branches_most]usize = undefined;

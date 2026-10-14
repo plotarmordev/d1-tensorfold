@@ -82,7 +82,7 @@ pub const Model = struct {
 
     /// y [rows, n] = x [rows, k] . w [n, k]^T, a plan kept a shape.
     fn linear(m: *Model, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize, out: cuda.cublaslt.DataType) !void {
-        const key = [3]u64{ rows, n, k | (@as(u64, @intFromEnum(out)) << 48) };
+        const key = [3]u64{ rows, n, k | (@as(u64, @intCast(@intFromEnum(out))) << 48) };
         const got = try m.linears.getOrPut(m.gpa, key);
         if (!got.found_existing) got.value_ptr.* = Linear.init(&m.lt, rows, n, k, out, workspace_bytes) catch |e| {
             m.linears.removeByPtr(got.key_ptr);

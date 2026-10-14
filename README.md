@@ -2,7 +2,7 @@
 
 Serve [Liquid AI's d1-3B](https://huggingface.co/LiquidAI/d1-3B) on one NVIDIA DGX Spark using
 [TensorFold's Python 0.6 engine](https://github.com/ashhart/TensorFold/tree/ed78d6fc204d89d90b045bf033d6551e7714f3a1) (the pinned commit this recipe builds), not the separate native 1.x engine.
-This private repository carries the audited LFM2 CUDA implementation, digest-pinned container build,
+This repository carries the audited LFM2 CUDA implementation, digest-pinned container build,
 launchers, checkpoint checksums and retained performance evidence.
 
 **Native checkpoint BF16 only.** The current engine replaces the earlier packed/quantized implementation.
@@ -26,7 +26,7 @@ cd d1-tensorfold
 ./start.sh
 ```
 
-Private repository access is required. `prepare.sh` builds the image and verifies the pinned checkpoint.
+`prepare.sh` builds the image and verifies the pinned checkpoint.
 The build applies three source patches and verifies all eleven changed runtime files against
 [checksums/tensorfold-audited.sha256](checksums/tensorfold-audited.sha256). It does not depend on a development
 source mount. First startup compiles CUDA/Triton kernels into `data/cache`; later launches reuse them.
@@ -138,7 +138,7 @@ reference agreed on 70/70 selected outcomes (maximum probability difference 0.01
 fidelity, not held-out accuracy. Earlier focused validation passed 78 host/CUDA/checkpoint tests; shared
 host validation passed 167 with two skipped. These overlap and are not a full-suite-green claim.
 
-The collector was a private unreleased TheGrill extension, not released v0.6 functionality. Its source
+The collector was an unreleased TheGrill extension, not released v0.6 functionality. Its source
 identity was unrecorded; its binary, plan and runtime source hashes are retained in
 [provenance.json](results/audited-bf16/provenance.json). Raw payloads and original audit artifacts stay outside git;
 neutralized timing derivatives and their source hashes are retained here. Failed eager and graph-only runs,

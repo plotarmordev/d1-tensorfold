@@ -2,11 +2,13 @@
 
 pub const attention = @import("attention.zig");
 pub const config = @import("config.zig");
+pub const image = @import("image.zig");
 pub const kernels = @import("kernels.zig");
 pub const model = @import("model.zig");
 pub const weights = @import("weights.zig");
 
 test {
     _ = config;
+    _ = image;
     _ = weights;
 }

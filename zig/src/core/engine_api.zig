@@ -336,8 +336,8 @@ pub const Engine = struct {
         memory: *const fn (ctx: *anyopaque, reset_peak: bool) ?Memory,
         /// The engine's queue as a keepalive target, or null when the backend is not Metal.
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
-        /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
-        score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
+        /// One logit per label at the row after `prompt`, and the vocabulary logsumexp when `mass` (else 0).
+        score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
     };
@@ -365,9 +365,9 @@ pub const Engine = struct {
     }
 
     /// The decision hook, or Unsupported when this engine does not score.
-    pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!f64 {
+    pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{ Failed, Unsupported }!f64 {
         const f = e.vtable.score orelse return error.Unsupported;
-        return f(e.ctx, prompt, labels, logits);
+        return f(e.ctx, prompt, labels, logits, mass);
     }
 
     /// The Sliding Weights hook, or Unsupported when this engine does not learn.

@@ -353,7 +353,8 @@ fn scoreOne(srv: *Server, cx: *Cx, prompt: []const u32, groups: []const []const 
     for (groups) |g| try labels.appendSlice(cx.a, g);
     const logits = try cx.a.alloc(f64, labels.items.len);
     @memset(logits, 0);
-    _ = srv.engine.score(prompt, labels.items, logits) catch |e| switch (e) {
+    // a softmax over the options alone: the vocabulary's mass is not read
+    _ = srv.engine.score(prompt, labels.items, logits, false) catch |e| switch (e) {
         error.Unsupported => return cx.refuse("decision scoring is not supported by this engine"),
         error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
     };

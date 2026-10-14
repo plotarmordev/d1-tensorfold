@@ -91,10 +91,11 @@ const Head = struct {
         return null;
     }
 
-    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 {
+    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
         const h: *Head = @ptrCast(@alignCast(ctx));
         const t = Text.decode(undefined, h.gpa, prompt) catch return error.Failed;
         h.prompts.append(h.gpa, t) catch return error.Failed;
+        if (mass) return error.Failed; // System One reads the options alone
         for (labels, logits) |id, *x| x.* = @as(f64, @floatFromInt((id * 37) % 101)) / 10.0;
         return 0;
     }

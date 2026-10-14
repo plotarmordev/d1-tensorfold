@@ -56,7 +56,7 @@ const Engine = struct {
         };
     }
 
-    /// Pictures decoded before the GPU is taken; branches packed into passes within the window, branch and label counts.
+    /// Pictures decoded before the GPU is taken; branches packed into passes within the window and model limits.
     fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
         const e = of(ctx);
         const a = d.arena orelse return error.Failed;

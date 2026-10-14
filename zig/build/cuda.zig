@@ -143,12 +143,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
-/// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
 /// LFM2 (d1's decision model) on CUDA: config, weights, kernels and the forward that scores labels.
 fn lfm2Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2/lfm2.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
 }
 
+/// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
 fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const mod = b.createModule(.{

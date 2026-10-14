@@ -1,6 +1,4 @@
-//! /v1/systemone: llama-server's System One request over a state, answered through the engine's score hook.
-//! Prompts follow the checkpoint's systemone template; an option scores its best single-token form, and each
-//! answer is a softmax over the options only, so the vocabulary's log-sum-exp is not read.
+//! /v1/systemone: llama-server's System One request, its options read at single-token forms through the engine.
 const std = @import("std");
 const json = @import("json.zig");
 const json_write = @import("json_write.zig");

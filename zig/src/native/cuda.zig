@@ -417,9 +417,10 @@ test "chip classes name the compute capability as gate entries do" {
     try std.testing.expectEqualStrings("nvidia-sm121", name);
 }
 
-test "every registered family is listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len), families.len);
+test "every registered family and d1's decision engine are listed for capabilities" {
+    try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
+    try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
 }
 
 test "variables: unset or empty means the default, anything but a whole number is refused" {

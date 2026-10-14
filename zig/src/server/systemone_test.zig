@@ -71,10 +71,14 @@ const Head = struct {
     gpa: Allocator,
     prompts: std.ArrayList([]u8) = .empty,
     window: u32 = 0,
-    hooked: bool = true,
+    hooks: enum { none, score, decide } = .decide,
 
     fn engine(h: *Head) api.Engine {
-        return .{ .ctx = h, .vtable = if (h.hooked) &hooked_vt else &bare_vt };
+        return .{ .ctx = h, .vtable = switch (h.hooks) {
+            .none => &bare_vt,
+            .score => &score_vt,
+            .decide => &decide_vt,
+        } };
     }
 
     fn info(ctx: *anyopaque) api.Info {
@@ -100,6 +104,20 @@ const Head = struct {
         return 0;
     }
 
+    fn decide(ctx: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{Failed}!void {
+        var at: usize = 0;
+        for (branches, counts) |b, n| {
+            const prompt = std.mem.concat(of(ctx).gpa, u32, &.{ trunk, b }) catch return error.Failed;
+            defer of(ctx).gpa.free(prompt);
+            _ = try score(ctx, prompt, labels[at..][0..n], logits[at..][0..n], false);
+            at += n;
+        }
+    }
+
+    fn of(ctx: *anyopaque) *Head {
+        return @ptrCast(@alignCast(ctx));
+    }
+
     fn reset(h: *Head) void {
         for (h.prompts.items) |p| h.gpa.free(p);
         h.prompts.clearRetainingCapacity();
@@ -107,7 +125,8 @@ const Head = struct {
 };
 
 const bare_vt: api.Engine.VTable = .{ .info = Head.info, .submit = Head.submit, .cancel = Head.cancel, .status = Head.status, .memory = Head.memory };
-const hooked_vt: api.Engine.VTable = .{ .info = Head.info, .submit = Head.submit, .cancel = Head.cancel, .status = Head.status, .memory = Head.memory, .score = Head.score };
+const score_vt: api.Engine.VTable = .{ .info = Head.info, .submit = Head.submit, .cancel = Head.cancel, .status = Head.status, .memory = Head.memory, .score = Head.score };
+const decide_vt: api.Engine.VTable = .{ .info = Head.info, .submit = Head.submit, .cancel = Head.cancel, .status = Head.status, .memory = Head.memory, .score = Head.score, .decide = Head.decide };
 
 fn serve(text: *Text, head: *Head) !*Server {
     return Server.init(std.testing.allocator, std.testing.io, head.engine(), text.text(), .{
@@ -138,25 +157,27 @@ fn expectSame(want: json.Value, got: json.Value) !void {
 
 const Case = struct { body: []const u8, want: []const u8, prompts: []const []const u8 };
 
-test "System One answers and prompts equal the Python engine's, byte for byte" {
-    var text: Text = .{};
-    var head: Head = .{ .gpa = std.testing.allocator };
-    defer {
-        head.reset();
-        head.prompts.deinit(std.testing.allocator);
-    }
-    const srv = try serve(&text, &head);
-    defer srv.deinit();
-    for (answered) |case| {
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        head.reset();
-        var cx: errors.Cx = .{ .a = a };
-        const out = try systemone.reply(srv, &cx, (try json.parse(a, case.body)).ok);
-        try expectSame((try json.parse(a, case.want)).ok, out);
-        try std.testing.expectEqual(case.prompts.len, head.prompts.items.len);
-        for (case.prompts, head.prompts.items) |want, got| try std.testing.expectEqualStrings(want, got);
+test "System One answers and prompts equal the Python engine's, packed or a pass a question" {
+    for ([_]@TypeOf(@as(Head, undefined).hooks){ .decide, .score }) |hooks| {
+        var text: Text = .{};
+        var head: Head = .{ .gpa = std.testing.allocator, .hooks = hooks };
+        defer {
+            head.reset();
+            head.prompts.deinit(std.testing.allocator);
+        }
+        const srv = try serve(&text, &head);
+        defer srv.deinit();
+        for (answered) |case| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            head.reset();
+            var cx: errors.Cx = .{ .a = a };
+            const out = try systemone.reply(srv, &cx, (try json.parse(a, case.body)).ok);
+            try expectSame((try json.parse(a, case.want)).ok, out);
+            try std.testing.expectEqual(case.prompts.len, head.prompts.items.len);
+            for (case.prompts, head.prompts.items) |want, got| try std.testing.expectEqualStrings(want, got);
+        }
     }
 }
 

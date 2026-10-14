@@ -88,11 +88,9 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
         if (window > 0 and trunk.len + b.len > window) return cx.fail(.request, "a decision sequence exceeds the {d}-token context", .{window});
         read += b.len;
     }
+    const scores = try scoreAll(srv, cx, trunk, branches, groups);
     const answers = try json.newObject(cx.a);
-    for (questions, branches, groups) |q, b, g| {
-        const scores = try scoreOne(srv, cx, try std.mem.concat(cx.a, u32, &.{ trunk, b }), g);
-        try answers.put(cx.a, q.id, try answer(cx.a, q, scores));
-    }
+    for (questions, scores) |q, s| try answers.put(cx.a, q.id, try answer(cx.a, q, s));
     const usage = try json.newObject(cx.a);
     try usage.put(cx.a, "input_tokens", try json.intValue(cx.a, read));
     try usage.put(cx.a, "output_tokens", .{ .int = "0" });
@@ -347,25 +345,45 @@ fn questionText(a: Allocator, w: *std.Io.Writer, q: Question, codes: []const Cod
     }
 }
 
-/// Each option's best logit among its forms, from one scored prompt.
-fn scoreOne(srv: *Server, cx: *Cx, prompt: []const u32, groups: []const []const u32) errors.Refused![]f64 {
+/// Each question's option scores (its best form's logit): one packed pass when the engine decides, else a pass each.
+fn scoreAll(srv: *Server, cx: *Cx, trunk: []const u32, branches: []const []const u32, groups: []const []const []const u32) errors.Refused![]const []const f64 {
     var labels: std.ArrayList(u32) = .empty;
-    for (groups) |g| try labels.appendSlice(cx.a, g);
+    const counts = try cx.a.alloc(usize, groups.len);
+    for (groups, counts) |g, *n| {
+        n.* = 0;
+        for (g) |forms| {
+            try labels.appendSlice(cx.a, forms);
+            n.* += forms.len;
+        }
+    }
     const logits = try cx.a.alloc(f64, labels.items.len);
     @memset(logits, 0);
-    // a softmax over the options alone: the vocabulary's mass is not read
-    _ = srv.engine.score(prompt, labels.items, logits, false) catch |e| switch (e) {
-        error.Unsupported => return cx.refuse("decision scoring is not supported by this engine"),
-        error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
-    };
-    const scores = try cx.a.alloc(f64, groups.len);
-    var at: usize = 0;
-    for (groups, scores) |g, *s| {
-        s.* = logits[at];
-        for (logits[at .. at + g.len]) |x| s.* = @max(s.*, x);
-        at += g.len;
+    if (srv.engine.vtable.decide != null) {
+        srv.engine.decide(trunk, branches, counts, labels.items, logits) catch return cx.fail(.server, "decision scoring failed", .{});
+    } else {
+        var at: usize = 0;
+        for (branches, counts) |b, n| {
+            const prompt = try std.mem.concat(cx.a, u32, &.{ trunk, b });
+            // a softmax over the options alone: the vocabulary's mass is not read
+            _ = srv.engine.score(prompt, labels.items[at..][0..n], logits[at..][0..n], false) catch |e| switch (e) {
+                error.Unsupported => return cx.refuse("decision scoring is not supported by this engine"),
+                error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
+            };
+            at += n;
+        }
     }
-    return scores;
+    const out = try cx.a.alloc([]const f64, groups.len);
+    var at: usize = 0;
+    for (groups, out) |g, *row| {
+        const scores = try cx.a.alloc(f64, g.len);
+        for (g, scores) |forms, *s| {
+            s.* = logits[at];
+            for (logits[at..][0..forms.len]) |x| s.* = @max(s.*, x);
+            at += forms.len;
+        }
+        row.* = scores;
+    }
+    return out;
 }
 
 fn answer(a: Allocator, q: Question, scores: []const f64) Allocator.Error!Value {

@@ -53,6 +53,31 @@ const Engine = struct {
         };
     }
 
+    /// Branches packed into passes of at most the window's rows and the model's branch count, as the Python port chunks.
+    fn decide(ctx: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{Failed}!void {
+        const e = of(ctx);
+        e.mutex.lockUncancelable(e.io);
+        defer e.mutex.unlock(e.io);
+        e.ctx.makeCurrent() catch return error.Failed;
+        var start: usize = 0;
+        var at: usize = 0;
+        while (start < branches.len) {
+            var end = start + 1;
+            var used = trunk.len + branches[start].len;
+            var n = counts[start];
+            while (end < branches.len and end - start < lfm2.model.branches_most and n + counts[end] <= lfm2.model.labels_most and used + branches[end].len <= e.window) : (end += 1) {
+                used += branches[end].len;
+                n += counts[end];
+            }
+            e.model.decide(trunk, branches[start..end], counts[start..end], labels[at..][0..n], logits[at..][0..n]) catch |err| {
+                std.log.err("lfm2 decision pass failed: {s}", .{@errorName(err)});
+                return error.Failed;
+            };
+            start = end;
+            at += n;
+        }
+    }
+
     fn close(ctx: *anyopaque) void {
         const e = of(ctx);
         e.ctx.makeCurrent() catch {};
@@ -64,7 +89,7 @@ const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    const vtable: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score };
+    const vtable: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score, .decide = decide };
 };
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {

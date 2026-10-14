@@ -387,6 +387,7 @@ fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []cons
     @memset(logits, 0);
     if (srv.engine.vtable.decide != null) {
         var d = trunk;
+        d.arena = cx.a;
         d.branches = branches;
         d.counts = counts;
         d.labels = labels.items;

@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const lfm2 = @import("lfm2");
+const core = @import("core");
 const Allocator = std.mem.Allocator;
 
 pub const family: api.Family = .{ .model_type = "lfm2_vl", .formats = &.{"bf16"} };
@@ -16,6 +17,8 @@ const Engine = struct {
     cfg: lfm2.config.Config,
     weights: lfm2.weights.Weights,
     model: lfm2.model.Model,
+    vision: ?lfm2.vision.Vision = null,
+    marks: ?lfm2.image.Marks = null, // the picture placeholders' ids; null: pictures refused
     window: u32,
     mutex: std.Io.Mutex = .init, // one prompt pass at a time: HTTP threads call score directly
 
@@ -24,7 +27,7 @@ const Engine = struct {
     }
 
     fn info(ctx: *anyopaque) api.Info {
-        return .{ .name = "lfm2", .context_window = of(ctx).window, .thinking_budget = false, .decides = true };
+        return .{ .name = "lfm2", .context_window = of(ctx).window, .thinking_budget = false, .decides = true, .pictures = of(ctx).vision != null };
     }
 
     fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
@@ -53,28 +56,47 @@ const Engine = struct {
         };
     }
 
-    /// Branches packed into passes within the window's rows and the model's branch and label counts.
+    /// Branches packed into passes within the window's rows and the model's branch and label counts; pictures
+    /// are decoded before the GPU is taken, their features laid over their placeholder rows.
     fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
         const e = of(ctx);
+        const a = d.arena orelse return error.Failed;
+        var trunk = d.trunk;
+        const pictures = a.alloc(lfm2.image.Picture, d.pictures.len) catch return error.Failed;
         if (d.pictures.len > 0) {
-            d.problem = "this checkpoint has no vision tower";
-            return error.Refused;
+            const marks = e.marks orelse return refuse(d, "this checkpoint has no vision tower");
+            var ids: std.ArrayList(u32) = .empty;
+            ids.appendSlice(a, d.trunk[0..d.at]) catch return error.Failed;
+            for (d.pictures, pictures) |url, *pic| {
+                var problem: []const u8 = "";
+                const rgb = lfm2.image.load(a, url, &problem) catch return error.Failed;
+                pic.* = lfm2.image.prepare(a, rgb orelse return refuse(d, problem)) catch return error.Failed;
+                pic.appendIds(a, &ids, &marks) catch return error.Failed;
+            }
+            ids.appendSlice(a, d.trunk[d.at..]) catch return error.Failed;
+            trunk = ids.items;
         }
+        for (d.branches) |b| if (trunk.len + b.len > e.window)
+            return refuse(d, std.fmt.allocPrint(a, "a decision sequence exceeds the {d}-token context", .{e.window}) catch return error.Failed);
         e.mutex.lockUncancelable(e.io);
         defer e.mutex.unlock(e.io);
         e.ctx.makeCurrent() catch return error.Failed;
-        d.read = d.trunk.len;
+        const placed = e.place(a, trunk, pictures) catch |err| {
+            std.log.err("lfm2 picture features failed: {s}", .{@errorName(err)});
+            return error.Failed;
+        };
+        d.read = trunk.len;
         var start: usize = 0;
         var at: usize = 0;
         while (start < d.branches.len) {
             var end = start + 1;
-            var used = d.trunk.len + d.branches[start].len;
+            var used = trunk.len + d.branches[start].len;
             var n = d.counts[start];
             while (end < d.branches.len and end - start < lfm2.model.branches_most and n + d.counts[end] <= lfm2.model.labels_most and used + d.branches[end].len <= e.window) : (end += 1) {
                 used += d.branches[end].len;
                 n += d.counts[end];
             }
-            e.model.decide(d.trunk, d.branches[start..end], d.counts[start..end], d.labels[at..][0..n], d.logits[at..][0..n]) catch |err| {
+            e.model.decide(trunk, d.branches[start..end], d.counts[start..end], d.labels[at..][0..n], d.logits[at..][0..n], placed) catch |err| {
                 std.log.err("lfm2 decision pass failed: {s}", .{@errorName(err)});
                 return error.Failed;
             };
@@ -84,9 +106,35 @@ const Engine = struct {
         }
     }
 
+    /// The pictures' features in the model's picture rows and the trunk's placeholder runs they cover; null without.
+    fn place(e: *Engine, a: Allocator, trunk: []const u32, pictures: []const lfm2.image.Picture) !?lfm2.model.Placed {
+        if (pictures.len == 0) return null;
+        const v = &e.vision.?;
+        const out = e.model.pictureRows();
+        var rows: usize = 0;
+        for (pictures) |*p| rows += try v.features(e.model.stream, p, out + 2 * rows * e.cfg.hidden);
+        var runs: std.ArrayList([2]usize) = .empty;
+        var slots: usize = 0;
+        for (trunk, 0..) |t, i| {
+            if (t != e.marks.?.image) continue;
+            slots += 1;
+            if (runs.items.len > 0 and runs.items[runs.items.len - 1][0] + runs.items[runs.items.len - 1][1] == i) {
+                runs.items[runs.items.len - 1][1] += 1;
+            } else try runs.append(a, .{ i, 1 });
+        }
+        if (slots != rows) return error.PictureSlots;
+        return .{ .features = out, .runs = runs.items };
+    }
+
+    fn refuse(d: *api.Decision, problem: []const u8) error{Refused} {
+        d.problem = problem;
+        return error.Refused;
+    }
+
     fn close(ctx: *anyopaque) void {
         const e = of(ctx);
         e.ctx.makeCurrent() catch {};
+        if (e.vision) |*v| v.deinit();
         e.model.deinit();
         e.weights.deinit(e.gpa);
         e.cfg.deinit(e.gpa);
@@ -122,5 +170,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     e.weights = try lfm2.weights.Weights.load(gpa, io, &e.driver, o.dir, &e.cfg);
     errdefer e.weights.deinit(gpa);
     e.model = try lfm2.model.Model.init(gpa, &e.driver, &e.cfg, &e.weights, window);
+    errdefer e.model.deinit();
+    if (e.weights.vision) |*vw| {
+        const path = try std.fs.path.join(a, &.{ o.dir, "tokenizer.json" });
+        var tok = try core.tokenizer.loadTokenizer(io, gpa, path);
+        defer tok.deinit();
+        e.marks = lfm2.image.Marks.resolve(&tok);
+        if (e.marks != null) e.vision = try lfm2.vision.Vision.init(gpa, &e.driver, &e.cfg, vw);
+    }
     return .{ .engine = .{ .ctx = e, .vtable = &Engine.vtable }, .close = Engine.close, .ctx = e };
 }

@@ -12,6 +12,9 @@ const workspace_bytes = 32 << 20;
 pub const labels_most = 4096;
 pub const branches_most = 256;
 
+/// Picture features over the trunk's placeholder rows: each run `[row, count]` takes the next `count` rows.
+pub const Placed = struct { features: u64, runs: []const [2]usize };
+
 pub const Model = struct {
     gpa: Allocator,
     cfg: *const Config,
@@ -80,7 +83,7 @@ pub const Model = struct {
     }
 
     /// One pass over trunk ++ branches: each branch's label logits (f32) at its last row, in branch order.
-    pub fn decide(m: *Model, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) !void {
+    pub fn decide(m: *Model, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, placed: ?Placed) !void {
         const rows = try m.upload(trunk, branches, labels);
         var leaves: [branches_most]usize = undefined;
         var row = trunk.len;
@@ -88,7 +91,7 @@ pub const Model = struct {
             row += br.len;
             leaf.* = row - 1;
         }
-        try m.forward(trunk.len, branches.len, rows, leaves[0..branches.len]);
+        try m.forward(trunk.len, branches.len, rows, leaves[0..branches.len], placed);
         var at: usize = 0;
         for (leaves[0..branches.len], counts) |leaf, n| {
             try m.k.labelLogits(m.stream, m.b.x + 2 * leaf * m.cfg.hidden, m.w.embed, m.b.labels + 4 * at, m.b.logits + 4 * at, n, m.cfg.hidden);
@@ -103,7 +106,7 @@ pub const Model = struct {
     /// `labels`' logits at the row after `prompt`, as a branch of its last token; the logsumexp when `mass`.
     pub fn score(m: *Model, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) !f64 {
         if (prompt.len == 0) return error.PromptLength;
-        try m.decide(prompt[0 .. prompt.len - 1], &.{prompt[prompt.len - 1 ..]}, &.{labels.len}, labels, logits);
+        try m.decide(prompt[0 .. prompt.len - 1], &.{prompt[prompt.len - 1 ..]}, &.{labels.len}, labels, logits, null);
         if (!mass) return 0;
         const c = m.cfg;
         try m.linear(m.b.x + 2 * (prompt.len - 1) * c.hidden, m.w.embed, m.b.logits, 1, c.vocab, c.hidden, .f32);
@@ -176,7 +179,12 @@ pub const Model = struct {
     }
 
     /// The layers over the uploaded rows; leaves each branch's final-normed last row in x.
-    fn forward(m: *Model, trunk: usize, branches: usize, rows: usize, leaves: []const usize) !void {
+    /// Where picture features may be written before a pass: free until the first layer, `rows_most` rows.
+    pub fn pictureRows(m: *const Model) u64 {
+        return m.b.y;
+    }
+
+    fn forward(m: *Model, trunk: usize, branches: usize, rows: usize, leaves: []const usize, placed: ?Placed) !void {
         const c = m.cfg;
         const s = m.stream;
         const b = m.b;
@@ -184,6 +192,14 @@ pub const Model = struct {
         const kvd = c.kv_heads * c.dim;
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(c.dim)));
         try m.embed.bf16(s, b.ids, m.w.embed, b.h, rows, c.hidden);
+        if (placed) |p| {
+            var from = p.features;
+            for (p.runs) |run| {
+                const n = 2 * run[1] * c.hidden;
+                try m.scratch.copyFrom(b.h + 2 * run[0] * c.hidden - m.scratch.ptr, from, n, s.handle);
+                from += n;
+            }
+        }
         try m.k.addRms(s, b.h, null, m.w.layers[0].op_norm, b.x, rows, c.hidden, c.eps);
         for (m.w.layers, 0..) |l, i| {
             switch (l.kind) {

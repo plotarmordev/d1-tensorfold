@@ -241,7 +241,8 @@ pub const Decision = struct {
     labels: []const u32 = &.{},
     logits: []f64 = &.{},
     read: usize = 0, // out: the trunk's tokens with its pictures expanded, plus every branch's
-    problem: []const u8 = "", // out: why the engine refused (error.Refused)
+    problem: []const u8 = "", // out: why the engine refused (error.Refused), in `arena`
+    arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.

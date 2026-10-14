@@ -156,7 +156,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron }, .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron }, .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) }, .{ .name = "core", .module = core } },
     });
     return .{ .api = api, .engines = mod };
 }

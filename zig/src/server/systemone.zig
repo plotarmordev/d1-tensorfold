@@ -1,5 +1,6 @@
 //! /v1/systemone: llama-server's System One request, its options read at single-token forms through the engine.
 const std = @import("std");
+const api = @import("engine_api");
 const json = @import("json.zig");
 const json_write = @import("json_write.zig");
 const errors = @import("errors.zig");
@@ -20,6 +21,7 @@ const bos = "<|startoftext|>";
 const yes_forms = [_][]const u8{ "yes", "Yes", "YES" };
 const no_forms = [_][]const u8{ "no", "No", "NO" };
 const media = [_][]const u8{ "input_audio", "audio", "video_url", "video" };
+const max_pictures = 4; // the Python server's default image limit
 
 const Kind = enum { noul, choice, score };
 
@@ -63,14 +65,16 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
 pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     const state = body.get("state") orelse return cx.refuse("a request needs a state (null when the question is the whole state)");
     const raw_questions = body.get("questions") orelse return cx.refuse("a request needs questions");
-    const pictures = try countPictures(cx, body, state);
+    const seen = try pictures(cx, body, state);
     if (raw_questions != .object or raw_questions.object.count() == 0) return cx.refuse("questions is a non-empty object of id: question");
     const questions = try cx.a.alloc(Question, raw_questions.object.count());
     for (raw_questions.object.keys(), raw_questions.object.values(), questions) |id, raw, *q| q.* = try parse(cx, id, raw);
-    if (pictures > 0) return cx.refuse("this checkpoint has no vision tower");
+    if (seen.urls.len > 0 and !srv.engine.info().pictures) return cx.refuse("this checkpoint has no vision tower");
 
     var f: Format = .{ .srv = srv, .cx = cx, .one = .init(cx.a) };
-    const trunk = try f.encode(try prefix(cx.a, state));
+    // with pictures the head and the state are encoded apart, the pictures' tokens between them (the processor's ids)
+    const head = if (seen.urls.len > 0) try f.encode(bos ++ im_start ++ "user\n") else &.{};
+    const trunk = if (seen.urls.len > 0) try std.mem.concat(cx.a, u32, &.{ head, try f.encode(try prefix(cx.a, seen.state, false)) }) else try f.encode(try prefix(cx.a, seen.state, true));
     const codes = try cx.a.alloc([]const Code, questions.len);
     const branches = try cx.a.alloc([]const u32, questions.len);
     for (questions, codes, branches) |q, *c, *b| {
@@ -83,10 +87,11 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     var read: usize = trunk.len;
     for (branches) |b| {
         if (b.len == 0) return cx.refuse("each question needs a nonempty token sequence");
-        if (window > 0 and trunk.len + b.len > window) return cx.fail(.request, "a decision sequence exceeds the {d}-token context", .{window});
+        // with pictures the engine checks the expanded trunk
+        if (seen.urls.len == 0 and window > 0 and trunk.len + b.len > window) return cx.fail(.request, "a decision sequence exceeds the {d}-token context", .{window});
         read += b.len;
     }
-    const scores = try scoreAll(srv, cx, trunk, branches, groups);
+    const scores = try scoreAll(srv, cx, .{ .trunk = trunk, .at = head.len, .pictures = seen.urls }, branches, groups, &read);
     const answers = try json.newObject(cx.a);
     for (questions, scores) |q, s| try answers.put(cx.a, q.id, try answer(cx.a, q, s));
     const usage = try json.newObject(cx.a);
@@ -99,29 +104,55 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     return .{ .object = out };
 }
 
-/// The request's pictures (files, images, a chat state's image parts); other media are refused.
-fn countPictures(cx: *Cx, body: Value, state: Value) errors.Refused!usize {
-    var n: usize = 0;
+const Seen = struct { urls: []const []const u8, state: Value };
+
+/// The request's pictures (files, images, then a chat state's image parts) and the state without them, as
+/// llama-server reads a System One state; other media are refused.
+fn pictures(cx: *Cx, body: Value, state: Value) errors.Refused!Seen {
+    var urls: std.ArrayList([]const u8) = .empty;
     for ([_][]const u8{ "files", "images" }) |key| if (body.get(key)) |v| switch (v) {
         .null => {},
-        .array => |items| n += items.len,
+        .array => |items| for (items) |item| try urls.append(cx.a, try url(cx, item)),
         else => return cx.fail(.request, "{s} must be an array of data URLs", .{key}),
     };
     if (body.get("videos")) |v| if (v.truthy()) return cx.refuse("videos are not supported");
     const messages = if (state == .object) state.get("messages") orelse .null else state;
-    if (messages != .array) return n;
-    for (messages.array) |message| {
-        const content = if (message == .object) message.get("content") orelse .null else .null;
-        if (content != .array) continue;
-        for (content.array) |part| {
-            const kind = if (part == .object) (part.get("type") orelse .null) else .null;
-            if (kind != .string) continue;
-            if (std.mem.eql(u8, kind.string, "image_url")) n += 1;
-            for (media) |m| if (std.mem.eql(u8, kind.string, m))
-                return cx.fail(.request, "{s} is not supported: a decision state takes images", .{m});
+    var kept_state = state;
+    if (messages == .array and messages.array.len > 0) {
+        const kept = try cx.a.alloc(Value, messages.array.len);
+        for (messages.array, kept) |message, *out| {
+            out.* = message;
+            const content = if (message == .object) message.get("content") orelse .null else .null;
+            if (content != .array) continue;
+            var parts: std.ArrayList(Value) = .empty;
+            for (content.array) |part| {
+                const kind = if (part == .object) (part.get("type") orelse .null) else .null;
+                if (kind == .string and std.mem.eql(u8, kind.string, "image_url")) {
+                    const u = part.get("image_url") orelse .null;
+                    try urls.append(cx.a, try url(cx, if (u == .object) u.get("url") orelse .null else u));
+                    continue;
+                }
+                if (kind == .string) for (media) |m| if (std.mem.eql(u8, kind.string, m))
+                    return cx.fail(.request, "{s} is not supported: a decision state takes images", .{m});
+                try parts.append(cx.a, part);
+            }
+            const copy = try json.newObject(cx.a);
+            for (message.object.keys(), message.object.values()) |k, v| try copy.put(cx.a, k, if (std.mem.eql(u8, k, "content")) .{ .array = parts.items } else v);
+            out.* = .{ .object = copy };
         }
+        if (state == .object) {
+            const copy = try json.newObject(cx.a);
+            for (state.object.keys(), state.object.values()) |k, v| try copy.put(cx.a, k, if (std.mem.eql(u8, k, "messages")) .{ .array = kept } else v);
+            kept_state = .{ .object = copy };
+        } else kept_state = .{ .array = kept };
     }
-    return n;
+    if (urls.items.len > max_pictures) return cx.fail(.request, "at most {d} pictures a request", .{max_pictures});
+    return .{ .urls = urls.items, .state = kept_state };
+}
+
+fn url(cx: *Cx, v: Value) errors.Refused![]const u8 {
+    if (v != .string or v.string.len == 0) return cx.refuse("image_url must contain a non-empty url string");
+    return v.string;
 }
 
 fn parse(cx: *Cx, id: []const u8, raw: Value) errors.Refused!Question {
@@ -258,14 +289,14 @@ fn pool(a: Allocator, i: usize) Allocator.Error!?[]const u8 {
     return null;
 }
 
-fn prefix(a: Allocator, state: Value) Allocator.Error![]const u8 {
+fn prefix(a: Allocator, state: Value, head: bool) Allocator.Error![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
-    writePrefix(&out.writer, state) catch return error.OutOfMemory;
+    writePrefix(&out.writer, state, head) catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }
 
-fn writePrefix(w: *std.Io.Writer, state: Value) std.Io.Writer.Error!void {
-    try w.writeAll(bos ++ im_start ++ "user\n");
+fn writePrefix(w: *std.Io.Writer, state: Value, head: bool) std.Io.Writer.Error!void {
+    if (head) try w.writeAll(bos ++ im_start ++ "user\n");
     if (state == .null) return;
     if (state == .string) try w.writeAll(state.string) else try indented(w, state, 0);
     try w.writeAll("\n\n\nQUESTION:\n");
@@ -343,7 +374,7 @@ fn questionText(a: Allocator, w: *std.Io.Writer, q: Question, codes: []const Cod
 }
 
 /// Each question's option scores (its best form's logit): one packed pass when the engine decides, else a pass each.
-fn scoreAll(srv: *Server, cx: *Cx, trunk: []const u32, branches: []const []const u32, groups: []const []const []const u32) errors.Refused![]const []const f64 {
+fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []const u32, groups: []const []const []const u32, read: *usize) errors.Refused![]const []const f64 {
     var labels: std.ArrayList(u32) = .empty;
     const counts = try cx.a.alloc(usize, groups.len);
     for (groups, counts) |g, *n| {
@@ -356,11 +387,20 @@ fn scoreAll(srv: *Server, cx: *Cx, trunk: []const u32, branches: []const []const
     const logits = try cx.a.alloc(f64, labels.items.len);
     @memset(logits, 0);
     if (srv.engine.vtable.decide != null) {
-        srv.engine.decide(trunk, branches, counts, labels.items, logits) catch return cx.fail(.server, "decision scoring failed", .{});
+        var d = trunk;
+        d.branches = branches;
+        d.counts = counts;
+        d.labels = labels.items;
+        d.logits = logits;
+        srv.engine.decide(&d) catch |e| switch (e) {
+            error.Refused => return cx.refuse(d.problem),
+            else => return cx.fail(.server, "decision scoring failed", .{}),
+        };
+        read.* = d.read;
     } else {
         var at: usize = 0;
         for (branches, counts) |b, n| {
-            const prompt = try std.mem.concat(cx.a, u32, &.{ trunk, b });
+            const prompt = try std.mem.concat(cx.a, u32, &.{ trunk.trunk, b });
             // a softmax over the options alone: the vocabulary's mass is not read
             _ = srv.engine.score(prompt, labels.items[at..][0..n], logits[at..][0..n], false) catch |e| switch (e) {
                 error.Unsupported => return cx.refuse("decision scoring is not supported by this engine"),

@@ -54,25 +54,31 @@ const Engine = struct {
     }
 
     /// Branches packed into passes within the window's rows and the model's branch and label counts.
-    fn decide(ctx: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{Failed}!void {
+    fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
         const e = of(ctx);
+        if (d.pictures.len > 0) {
+            d.problem = "this checkpoint has no vision tower";
+            return error.Refused;
+        }
         e.mutex.lockUncancelable(e.io);
         defer e.mutex.unlock(e.io);
         e.ctx.makeCurrent() catch return error.Failed;
+        d.read = d.trunk.len;
         var start: usize = 0;
         var at: usize = 0;
-        while (start < branches.len) {
+        while (start < d.branches.len) {
             var end = start + 1;
-            var used = trunk.len + branches[start].len;
-            var n = counts[start];
-            while (end < branches.len and end - start < lfm2.model.branches_most and n + counts[end] <= lfm2.model.labels_most and used + branches[end].len <= e.window) : (end += 1) {
-                used += branches[end].len;
-                n += counts[end];
+            var used = d.trunk.len + d.branches[start].len;
+            var n = d.counts[start];
+            while (end < d.branches.len and end - start < lfm2.model.branches_most and n + d.counts[end] <= lfm2.model.labels_most and used + d.branches[end].len <= e.window) : (end += 1) {
+                used += d.branches[end].len;
+                n += d.counts[end];
             }
-            e.model.decide(trunk, branches[start..end], counts[start..end], labels[at..][0..n], logits[at..][0..n]) catch |err| {
+            e.model.decide(d.trunk, d.branches[start..end], d.counts[start..end], d.labels[at..][0..n], d.logits[at..][0..n]) catch |err| {
                 std.log.err("lfm2 decision pass failed: {s}", .{@errorName(err)});
                 return error.Failed;
             };
+            for (d.branches[start..end]) |b| d.read += b.len;
             start = end;
             at += n;
         }

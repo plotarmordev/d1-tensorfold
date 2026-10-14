@@ -72,6 +72,8 @@ const Head = struct {
     prompts: std.ArrayList([]u8) = .empty,
     window: u32 = 0,
     hooks: enum { none, score, decide } = .decide,
+    pictures: bool = false,
+    seen: ?api.Decision = null, // the last decision, its slices valid while the request's arena lives
 
     fn engine(h: *Head) api.Engine {
         return .{ .ctx = h, .vtable = switch (h.hooks) {
@@ -83,7 +85,7 @@ const Head = struct {
 
     fn info(ctx: *anyopaque) api.Info {
         const h: *Head = @ptrCast(@alignCast(ctx));
-        return .{ .context_window = h.window };
+        return .{ .context_window = h.window, .pictures = h.pictures };
     }
 
     fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {}
@@ -104,13 +106,16 @@ const Head = struct {
         return 0;
     }
 
-    fn decide(ctx: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{Failed}!void {
+    fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
+        of(ctx).seen = d.*;
         var at: usize = 0;
-        for (branches, counts) |b, n| {
-            const prompt = std.mem.concat(of(ctx).gpa, u32, &.{ trunk, b }) catch return error.Failed;
+        d.read = d.trunk.len;
+        for (d.branches, d.counts) |b, n| {
+            const prompt = std.mem.concat(of(ctx).gpa, u32, &.{ d.trunk, b }) catch return error.Failed;
             defer of(ctx).gpa.free(prompt);
-            _ = try score(ctx, prompt, labels[at..][0..n], logits[at..][0..n], false);
+            _ = try score(ctx, prompt, d.labels[at..][0..n], d.logits[at..][0..n], false);
             at += n;
+            d.read += b.len;
         }
     }
 
@@ -204,6 +209,38 @@ test "System One refuses as the Python engine does, before any scoring" {
     try std.testing.expectError(error.Refused, systemone.reply(srv, &cx, (try json.parse(a, answered[0].body)).ok));
     try std.testing.expectEqualStrings("a decision sequence exceeds the 8-token context", cx.message);
     try std.testing.expectEqual(@as(usize, 0), head.prompts.items.len);
+}
+
+test "pictures reach the engine in llama-server's order, the state's image parts taken out of its text" {
+    var text: Text = .{};
+    var head: Head = .{ .gpa = std.testing.allocator, .pictures = true };
+    defer {
+        head.reset();
+        head.prompts.deinit(std.testing.allocator);
+    }
+    const srv = try serve(&text, &head);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body =
+        \\{"state": {"messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBB"}}]}, {"role": "assistant", "content": "ok"}], "note": 1},
+        \\ "images": ["data:image/png;base64,AAA"], "questions": {"q": {"type": "noul", "instructions": "i"}}}
+    ;
+    var cx: errors.Cx = .{ .a = a };
+    _ = try systemone.reply(srv, &cx, (try json.parse(a, body)).ok);
+    const d = head.seen.?;
+    try std.testing.expectEqual(@as(usize, 2), d.pictures.len);
+    try std.testing.expectEqualStrings("data:image/png;base64,AAA", d.pictures[0]);
+    try std.testing.expectEqualStrings("data:image/png;base64,BBB", d.pictures[1]);
+    const head_text = try Text.decode(undefined, a, d.trunk[0..d.at]);
+    try std.testing.expectEqualStrings("<|startoftext|><|im_start|>user\n", head_text);
+    // the Python port's state block for the same state with its image part taken out
+    const want = "{\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"look\"\n        }\n      ]\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"ok\"\n    }\n  ],\n  \"note\": 1\n}\n\n\nQUESTION:\n";
+    try std.testing.expectEqualStrings(want, try Text.decode(undefined, a, d.trunk[d.at..]));
+    const five = "{\"state\": null, \"images\": [\"a\", \"b\", \"c\", \"d\", \"e\"], \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"i\"}}}";
+    try std.testing.expectError(error.Refused, systemone.reply(srv, &cx, (try json.parse(a, five)).ok));
+    try std.testing.expectEqualStrings("at most 4 pictures a request", cx.message);
 }
 
 pub const answered = [_]Case{

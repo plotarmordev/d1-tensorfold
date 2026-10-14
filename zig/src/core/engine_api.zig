@@ -162,6 +162,8 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
+    /// Decisions may carry pictures (`Decision.pictures`).
+    pictures: bool = false,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
@@ -230,6 +232,19 @@ pub const Open = struct {
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
+/// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
+pub const Decision = struct {
+    trunk: []const u32,
+    at: usize = 0,
+    pictures: []const []const u8 = &.{}, // data URLs, in prompt order
+    branches: []const []const u32 = &.{},
+    counts: []const usize = &.{},
+    labels: []const u32 = &.{},
+    logits: []f64 = &.{},
+    read: usize = 0, // out: the trunk's tokens with its pictures expanded, plus every branch's
+    problem: []const u8 = "", // out: why the engine refused (error.Refused)
+};
+
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0 };
@@ -340,8 +355,8 @@ pub const Engine = struct {
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
         /// One logit per label at the row after `prompt`, and the vocabulary logsumexp when `mass` (else 0).
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 = null,
-        /// Each branch's label logits at its last row after a shared `trunk` (`counts` labels a branch, in order).
-        decide: ?*const fn (ctx: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{Failed}!void = null,
+        /// Each branch's label logits at its last row after the decision's shared trunk.
+        decide: ?*const fn (ctx: *anyopaque, d: *Decision) error{ Failed, Refused }!void = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
     };
@@ -374,9 +389,9 @@ pub const Engine = struct {
         return f(e.ctx, prompt, labels, logits, mass);
     }
 
-    pub fn decide(e: Engine, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!void {
+    pub fn decide(e: Engine, d: *Decision) error{ Failed, Refused, Unsupported }!void {
         const f = e.vtable.decide orelse return error.Unsupported;
-        return f(e.ctx, trunk, branches, counts, labels, logits);
+        return f(e.ctx, d);
     }
 
     /// The Sliding Weights hook, or Unsupported when this engine does not learn.

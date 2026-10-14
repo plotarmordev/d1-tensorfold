@@ -1,4 +1,4 @@
-//! LFM2-VL's vision kernels against host references, then pictures' features against the Python port's CPU goldens.
+//! LFM2-VL's vision kernels against host references, then pictures' features against transformers' modules on the CPU.
 
 const std = @import("std");
 const cuda = @import("cuda");

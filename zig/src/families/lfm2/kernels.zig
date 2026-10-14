@@ -1,4 +1,4 @@
-//! lfm2.cu's glue kernels, one call each on a stream: bf16 activations, fused.py's rounding, fixed-order fp32 sums.
+//! lfm2.cu's glue kernels, one call each on a stream: bf16 activations, torch's bf16 rounding, fixed-order fp32 sums.
 const cuda = @import("cuda");
 
 const threads = 256; // lfm2.cu's NT

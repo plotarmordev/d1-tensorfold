@@ -21,7 +21,7 @@ const bos = "<|startoftext|>";
 const yes_forms = [_][]const u8{ "yes", "Yes", "YES" };
 const no_forms = [_][]const u8{ "no", "No", "NO" };
 const media = [_][]const u8{ "input_audio", "audio", "video_url", "video" };
-const max_pictures = 4; // the Python server's default image limit
+const max_pictures = 4; // TensorFold 0.6's ImageLimits.max_images
 
 const Kind = enum { noul, choice, score };
 

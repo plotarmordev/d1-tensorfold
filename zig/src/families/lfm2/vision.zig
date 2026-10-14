@@ -1,4 +1,4 @@
-//! LFM2-VL's pictures on CUDA: the SigLIP2 NaFlex tower and the projector a tile at a time, as vision.py runs them.
+//! LFM2-VL's pictures on CUDA: Siglip2VisionModel's NaFlex tower, then Lfm2VlMultiModalProjector a tile at a time.
 const std = @import("std");
 const cuda = @import("cuda");
 const config = @import("config.zig");

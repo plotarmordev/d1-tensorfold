@@ -1,4 +1,4 @@
-//! /v1/systemone against the Python engine's answers: the same fake tokenizer and head logits give the same bytes.
+//! /v1/systemone against llama-server System One goldens: the same fake tokenizer and head logits give the same bytes.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
@@ -162,7 +162,7 @@ fn expectSame(want: json.Value, got: json.Value) !void {
 
 const Case = struct { body: []const u8, want: []const u8, prompts: []const []const u8 };
 
-test "System One answers and prompts equal the Python engine's, packed or a pass a question" {
+test "System One answers and prompts equal the goldens, packed or a pass a question" {
     for ([_]@TypeOf(@as(Head, undefined).hooks){ .decide, .score }) |hooks| {
         var text: Text = .{};
         var head: Head = .{ .gpa = std.testing.allocator, .hooks = hooks };
@@ -186,7 +186,7 @@ test "System One answers and prompts equal the Python engine's, packed or a pass
     }
 }
 
-test "System One refuses as the Python engine does, before any scoring" {
+test "System One refuses in the goldens' words, before any scoring" {
     var text: Text = .{};
     var head: Head = .{ .gpa = std.testing.allocator };
     defer head.prompts.deinit(std.testing.allocator);
@@ -235,7 +235,7 @@ test "pictures reach the engine in llama-server's order, the state's image parts
     try std.testing.expectEqualStrings("data:image/png;base64,BBB", d.pictures[1]);
     const head_text = try Text.decode(undefined, a, d.trunk[0..d.at]);
     try std.testing.expectEqualStrings("<|startoftext|><|im_start|>user\n", head_text);
-    // the Python port's state block for the same state with its image part taken out
+    // the System One state block for the same state with its image part taken out
     const want = "{\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"look\"\n        }\n      ]\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"ok\"\n    }\n  ],\n  \"note\": 1\n}\n\n\nQUESTION:\n";
     try std.testing.expectEqualStrings(want, try Text.decode(undefined, a, d.trunk[d.at..]));
     const five = "{\"state\": null, \"images\": [\"a\", \"b\", \"c\", \"d\", \"e\"], \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"i\"}}}";
@@ -243,6 +243,7 @@ test "pictures reach the engine in llama-server's order, the state's image parts
     try std.testing.expectEqualStrings("at most 4 pictures a request", cx.message);
 }
 
+// The goldens, reproduced from the d1 recipe's Python reference (github.com/plotarmordev/d1-tensorfold).
 pub const answered = [_]Case{
     .{ .body = "{\"state\": \"I was charged twice, refund one.\", \"questions\": {\"refund\": {\"type\": \"noul\", \"instructions\": \"Is this a refund request?\"}}}", .want = "{\"model\": \"m\", \"answers\": {\"refund\": {\"type\": \"noul\", \"noul\": 0.2689414213699951}}, \"usage\": {\"input_tokens\": 115, \"output_tokens\": 0}}", .prompts = &.{
         "<|startoftext|><|im_start|>user\nI was charged twice, refund one.\n\n\nQUESTION:\nIs this a refund request?\n\nReply with yes or no only.<|im_end|>\n<|im_start|>assistant\n",

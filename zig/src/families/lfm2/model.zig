@@ -117,7 +117,7 @@ pub const Model = struct {
         return out[0];
     }
 
-    /// The packed rows' ids, positions, conv taps and branch offsets (model.py's Tree) and the labels, uploaded.
+    /// The packed rows' ids, positions, conv taps and branch offsets and the labels, uploaded.
     fn upload(m: *Model, trunk: []const u32, branches: []const []const u32, labels: []const u32) !usize {
         var rows = trunk.len;
         for (branches) |br| {
@@ -221,7 +221,7 @@ pub const Model = struct {
             try m.linear(b.g, l.down, b.y, rows, c.hidden, c.ffn, .bf16);
             if (i + 1 < m.w.layers.len) try m.k.addRms(s, b.h, b.y, m.w.layers[i + 1].op_norm, b.x, rows, c.hidden, c.eps);
         }
-        // the final norm at each branch's last row alone, as the Python port normalizes only the rows it reads
+        // the final norm at each branch's last row alone: the head reads no other row
         for (leaves) |row| {
             const at = 2 * row * c.hidden;
             try m.k.addRms(s, b.h + at, b.y + at, m.w.norm, b.x + at, 1, c.hidden, c.eps);

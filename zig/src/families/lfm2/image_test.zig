@@ -1,4 +1,4 @@
-//! The Python port's goldens (zig/tests/fixtures/lfm2/images.py): RGB, refusals, tiles, patches and ids.
+//! The picture goldens (zig/tests/fixtures/lfm2/images.py): RGB, refusals, tiles, patches and ids.
 
 const std = @import("std");
 const image = @import("image.zig");

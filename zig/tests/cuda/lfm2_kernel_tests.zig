@@ -1,4 +1,4 @@
-//! lfm2.cu's kernels at d1's shapes against host references that round where fused.py rounds: every byte.
+//! lfm2.cu's kernels at d1's shapes against host references that round where the bf16 torch modules round: every byte.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -22,7 +22,7 @@ const table_rows = 1024; // label rows drawn from a table this tall: the sum ord
 const nt = 256; // lfm2.cu's NT
 const lt = 1024; // LT
 
-/// model.Tree's packing: a trunk of `p` rows then branches, each row's position and predecessors (-1: none).
+/// The packed prompt: a trunk of `p` rows then branches, each row's position and predecessors (-1: none).
 const Tree = struct { rows: usize, positions: []i32, prev: []i32 };
 
 fn tree(a: std.mem.Allocator, p: usize, lengths: []const usize) !Tree {

@@ -1,9 +1,10 @@
-"""LFM2-VL picture goldens from tensorfold's Python port, in d1's Docker image on the CPU: images.py MODEL_DIR OUT."""
+"""LFM2-VL picture goldens on the CPU, TensorFold 0.6.6's loader then Lfm2VlImageProcessor: images.py MODEL_DIR OUT."""
 
 import base64
 import hashlib
 import io
 import json
+import math
 import struct
 import sys
 import zlib
@@ -12,11 +13,19 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor
 
-from tensorfold.families.lfm2.cuda.vision import Vision, _cap
-from tensorfold.families.lfm2.decisions import BOS, IM_START, Format
 from tensorfold.vision.images import ImageInputError, ImageSource, load_images
 
 RNG = np.random.default_rng(7)
+CAP = 1024 * 1024
+
+
+def cap(image):
+    """A picture over CAP pixels shrunk to fit with Pillow's bicubic, as d1-tensorfold bounds pictures."""
+    w, h = image.size
+    if w * h <= CAP:
+        return image
+    s = math.sqrt(CAP / (w * h))
+    return image.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.BICUBIC)
 
 
 def scene(w, h, channels=3, noise=6.0):
@@ -175,7 +184,7 @@ def main(model_dir, out_path):
     for name, make in PICTURES.items():
         link = make()
         (img,) = load_images([ImageSource(link)])
-        pic = _cap(img.to_pil())
+        pic = cap(img.to_pil())
         pics.append(pic)
         out = processor(text=["<image>"], images=[[pic]], return_tensors="pt", add_special_tokens=False)
         tiles = out["spatial_shapes"].tolist()
@@ -187,15 +196,16 @@ def main(model_dir, out_path):
                       "patches": [hashlib.sha256(pv[i, :n].contiguous().numpy().astype("<f4").tobytes()).hexdigest()
                                   for i, n in enumerate(lengths)],
                       "ids": runs(out["input_ids"][0].tolist())})
-    # the trunk's layout: the head and the body encode on their own, each picture's span between them
-    fmt = Format(tok._tokenizer)
-    markup = Vision(processor, None, None, marks["image"], "cpu").markup(2)
-    assert markup == "<image><image>"
-    body = Format.state_block({"screen": "two pictures"}) + "\nQUESTION:\n"
-    text = fmt.prefix({"screen": "two pictures"}, markup)
-    whole = processor(text=[text], images=[pics[:2]], add_special_tokens=False)["input_ids"][0]
+    # the System One trunk: the head and the state block encode on their own, each picture's span between them
+    turn = [{"role": "user", "content": [{"type": "image"}, {"type": "image"}, {"type": "text", "text": "\0"}]}]
+    markup = "<image><image>"
+    assert f"<|im_start|>user\n{markup}\0" in processor.apply_chat_template(turn, tokenize=False)
+    head = "<|startoftext|><|im_start|>user\n"
+    body = json.dumps({"screen": "two pictures"}, indent=2) + "\n\n\nQUESTION:\n"
+    whole = processor(text=[head + markup + body], images=[pics[:2]], add_special_tokens=False)["input_ids"][0]
     spans = [processor(text=["<image>"], images=[[p]], add_special_tokens=False)["input_ids"][0] for p in pics[:2]]
-    assert whole == fmt.encode(f"{BOS}{IM_START}user\n") + spans[0] + spans[1] + fmt.encode(body)
+    ends = [tok.encode(text, add_special_tokens=False) for text in (head, body)]
+    assert whole == ends[0] + spans[0] + spans[1] + ends[1]
     with open(out_path, "w") as f:
         json.dump({"marks": marks, "cases": cases}, f, indent=1)
         f.write("\n")

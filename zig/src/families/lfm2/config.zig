@@ -1,4 +1,4 @@
-//! LFM2 config.json: an `lfm2_vl` text_config and vision_config, or a plain `lfm2` one, refused as Python refuses.
+//! LFM2 config.json: an `lfm2_vl` text_config and vision_config, or a plain `lfm2` one, refused with every reason.
 
 const std = @import("std");
 const Value = std.json.Value;
@@ -48,7 +48,7 @@ pub const Config = struct {
         return parse(a, bytes, problem);
     }
 
-    /// The config, or null with `problem` (from `a`) worded as read_text_config's refusal; `layers` live in `a`.
+    /// The config, or null with `problem` (from `a`) naming what the kernels cannot read; `layers` live in `a`.
     pub fn parse(a: std.mem.Allocator, json_text: []const u8, problem: *[]const u8) !?Config {
         var arena: std.heap.ArenaAllocator = .init(a);
         defer arena.deinit();
@@ -91,7 +91,7 @@ pub const Config = struct {
     }
 };
 
-/// read_text_config's refusal, or null when the kernels read this config.
+/// Why the kernels cannot read this config, every failed check in order, or null when they can.
 fn refusal(a: std.mem.Allocator, root: Object, nested: ?Object, text: Object) !?[]const u8 {
     if (quantization(root, nested)) |block| if (try quantMethod(a, block)) |method| {
         return try std.fmt.allocPrint(a, "LFM2 d1 runs the checkpoint's own bf16 weights ({s}) and quantizes nothing at load; this checkpoint stores {s}. Serve the bf16 checkpoint it ships. {s}", .{ model, try describe(a, block, method), own_model_help });
@@ -446,7 +446,7 @@ fn stores(comptime what: []const u8) []const u8 {
     return "LFM2 d1 runs the checkpoint's own bf16 weights (LiquidAI/d1-3B) and quantizes nothing at load; this checkpoint stores " ++ what ++ ". Serve the bf16 checkpoint it ships. " ++ own_model_help;
 }
 
-test "refusals list every problem in read_text_config's words and order" {
+test "refusals list every problem in the checks' words and order" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();

@@ -1,4 +1,4 @@
-// LFM2's glue kernels (families/lfm2/kernels.zig): fused.py's bf16 rounding points over fixed-order fp32 sums.
+// LFM2's glue kernels (families/lfm2/kernels.zig): torch's bf16 rounding points over fixed-order fp32 sums.
 
 #include <cuda_bf16.h>
 #include <math.h>

@@ -1,4 +1,4 @@
-//! LFM2-VL pictures on the CPU, as d1's Python port prepares them: data URL, RGB, tiles, patches and placeholder ids.
+//! LFM2-VL pictures on the CPU: data URL to RGB, then Lfm2VlImageProcessor's tiles, patches and placeholder ids.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -12,14 +12,14 @@ const max_bytes = 10 << 20;
 const max_side = 8192;
 const max_pixels = 16 << 20;
 
-// d1-3B's processor_config.json (Lfm2VlImageProcessor), and vision.py's bound on a picture's pixels
+// d1-3B's processor_config.json (Lfm2VlImageProcessor), and the d1 recipe's bound on a picture's pixels
 const patch = 16; // encoder_patch_size
 const downsample = 2; // downsample_factor
 const tile = 512; // tile_size
 const min_tokens = 64; // min_image_tokens
 const max_tokens = 256; // max_image_tokens
 const tolerance = 2.0; // max_pixels_tolerance
-const cap_pixels = 1024 * 1024; // vision.py's MAX_PIXELS
+const cap_pixels = 1024 * 1024; // the d1 recipe's MAX_PIXELS
 
 pub const max_grid = 10; // max_tiles: a grid is at most 10 tiles a side
 pub const patch_width = 3 * patch * patch;
@@ -254,7 +254,7 @@ pub const Marks = struct {
     }
 };
 
-/// vision.py's size cap, then the processor: 512-pixel tiles and a thumbnail, or one tile; torch's uint8 bicubic.
+/// The size cap, then the processor: 512-pixel tiles and a thumbnail, or one tile; torch's uint8 bicubic.
 pub fn prepare(a: Allocator, rgb: Rgb) Allocator.Error!Picture {
     const capped = try cap(a, rgb);
     defer if (capped) |c| a.free(c.pixels);
@@ -285,7 +285,7 @@ pub fn prepare(a: Allocator, rgb: Rgb) Allocator.Error!Picture {
     return .{ .patches = patches, .tiles = tiles, .rows = rows, .cols = cols };
 }
 
-/// vision.py's `_cap`: a picture over MAX_PIXELS shrunk to fit with Pillow's bicubic; null when it already fits.
+/// A picture over `cap_pixels` shrunk to fit with Pillow's bicubic; null when it already fits.
 fn cap(a: Allocator, rgb: Rgb) Allocator.Error!?Rgb {
     if (rgb.width * rgb.height <= cap_pixels) return null;
     const s = @sqrt(@as(f64, cap_pixels) / @as(f64, @floatFromInt(rgb.width * rgb.height)));

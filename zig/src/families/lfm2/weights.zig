@@ -1,4 +1,4 @@
-//! LFM2 weights on the GPU: the checkpoint's bf16 tensors in one allocation, stacked as cuda/model.py's Model.load.
+//! LFM2 weights on the GPU: the checkpoint's bf16 tensors in one allocation, each layer's projections stacked.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -294,7 +294,7 @@ const Planner = struct {
         return n;
     }
 
-    /// Refuses names under `prefixes` beyond the `taken` the plan copies, naming the first four as Model.load does.
+    /// Refuses names under `prefixes` beyond the `taken` the plan copies, naming the first four in name order.
     fn unread(p: *Planner, prefixes: []const []const u8, taken: usize, comptime what: []const u8) !void {
         const n = p.count(prefixes);
         if (n == taken) return;

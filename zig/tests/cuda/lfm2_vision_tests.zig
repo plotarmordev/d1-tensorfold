@@ -24,6 +24,7 @@ const sum_tolerance = 0.17; // every row's sum
 const row_tolerance = 0.035; // the picked rows whole
 const cos_least = 0.998; // each picked row's cosine similarity
 const gelu_share = 0.15; // GELU elements off: 2-ulp tanhf and erff flip bf16 roundings in the cancelling negative tail
+const linear_share = 0.01; // spread values a bf16 step off: the two plans may sum the products in other orders
 
 extern fn erf(x: f64) f64;
 
@@ -81,16 +82,14 @@ fn geluErf(x: f32) f32 {
     return x * 0.5 * (1 + @as(f32, @floatCast(erf(@as(f64, x * alpha)))));
 }
 
-fn bias(acc: []const f32, b: []const u16, r: ?[]const u16, o: []u16, n: usize, act: vision.Act) void {
-    for (acc, o, 0..) |x, *out, i| {
-        var v = gm.rbf(x + bf(b[i % n]));
-        v = switch (act) {
-            .none => v,
-            .gelu_tanh => gm.rbf(geluTanh(v)),
-            .gelu => gm.rbf(geluErf(v)),
-        };
-        out.* = gm.f32ToBf16(if (r) |res| bf(res[i]) + v else v);
-    }
+/// tf_lfm2v_pointwise's element: bf16(gelu(v)) through `act`, then bf16(r + v).
+fn finish(v: f32, r: ?f32, act: vision.Act) u16 {
+    const x = switch (act) {
+        .none => v,
+        .gelu_tanh => gm.rbf(geluTanh(v)),
+        .gelu => gm.rbf(geluErf(v)),
+    };
+    return gm.f32ToBf16(if (r) |res| res + x else x);
 }
 
 /// SDPA in f64 over qkv [rows, 3 H D] -> [rows, H D]; bound: one bf16 rounding of each output, two of each probability.
@@ -132,6 +131,7 @@ const Rig = struct {
     s: cuda.Stream,
     k: vision.Kernels,
     at: lfm2.attention.Attention,
+    g: vision.Gemms,
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -201,18 +201,88 @@ fn normCases(r: *Rig, rows: usize) !void {
     try r.near("layer_norm", rows, yd, y, 0);
 }
 
-fn biasCases(r: *Rig, rows: usize) !void {
-    for ([_]vision.Act{ .none, .gelu_tanh, .gelu }, [_]usize{ hidden, ffn, 2048 }) |act, n| for ([_]bool{ false, true }) |with_r| {
-        if (with_r and act != .none) continue;
-        const acc = try r.f32s(rows * n, 4.0);
-        const b = try r.bfs(n, 1.0);
+fn pointwiseCases(r: *Rig, rows: usize) !void {
+    for ([_]vision.Act{ .none, .gelu_tanh, .gelu }, [_]usize{ hidden, ffn, 2048 }) |act, n| {
+        const x = try r.bfs(rows * n, 4.0);
         const res = try r.bfs(rows * n, 2.0);
+        const with_r = act == .none;
         const od = if (with_r) try r.dev(u16, res) else try r.zeros(u16, rows * n);
-        try r.k.bias(r.s, try r.dev(f32, acc), try r.dev(u16, b), if (with_r) od else null, od, rows, n, act);
+        try r.k.pointwise(r.s, try r.dev(u16, x), if (with_r) od else null, od, rows * n, act);
         const o = try r.a.alloc(u16, rows * n);
-        bias(acc, b, if (with_r) res else null, o, n, act);
-        try r.near(if (with_r) "bias + residual in place" else @tagName(act), rows, od, o, if (act == .none) 0 else gelu_share);
-    };
+        for (o, x, res) |*y, v, rv| y.* = finish(bf(v), if (with_r) bf(rv) else null, act);
+        try r.near(if (with_r) "residual add in place" else @tagName(act), rows, od, o, if (with_r) 0 else gelu_share);
+    }
+    const acc = try r.f32s(rows * hidden, 4.0);
+    const b = try r.bfs(hidden, 1.0);
+    const od = try r.zeros(u16, rows * hidden);
+    try r.k.bias(r.s, try r.dev(f32, acc), try r.dev(u16, b), od, rows, hidden);
+    const o = try r.a.alloc(u16, rows * hidden);
+    for (o, acc, 0..) |*y, v, i| y.* = gm.f32ToBf16(v + bf(b[i % hidden]));
+    try r.near("bias kernel", rows, od, o, 0);
+}
+
+/// The tower's and projector's Linear shapes (n outputs, k inputs).
+const linears = [_]struct { name: []const u8, n: usize, k: usize }{
+    .{ .name = "patch", .n = hidden, .k = 768 },
+    .{ .name = "qkv", .n = 3 * hidden, .k = hidden },
+    .{ .name = "out_proj", .n = hidden, .k = hidden },
+    .{ .name = "fc1", .n = ffn, .k = hidden },
+    .{ .name = "fc2", .n = hidden, .k = ffn },
+    .{ .name = "linear_1", .n = 2048, .k = 4 * hidden },
+    .{ .name = "linear_2", .n = 2048, .k = 2048 },
+};
+
+/// Each Linear, epilogue or fallback, against bf16(f32 product + bias): exact products byte for byte, then spread ones.
+fn linearCases(r: *Rig, rows: usize) !void {
+    for (linears) |l| {
+        const name = try std.fmt.allocPrint(r.a, "{s} ({s})", .{ l.name, if (try r.g.fused(rows, l.n, l.k)) "bias in the epilogue" else "bias kernel" });
+        const b = try r.bfs(l.n, 1.0);
+        const bd = try r.dev(u16, b);
+        const yd = try r.zeros(u16, rows * l.n);
+        const spare = try r.zeros(f32, rows * l.n);
+        // multiples of 2^-6 up to 1/8: every partial sum is exact in f32, so any summation order gives the same product
+        if (rows < 1024) {
+            const xi = try r.a.alloc(i8, rows * l.k);
+            const wi = try r.a.alloc(i8, l.n * l.k);
+            for ([_][]i8{ xi, wi }) |m| for (m) |*v| {
+                v.* = r.rng.intRangeAtMost(i8, -8, 8);
+            };
+            try vision.linear(&r.g, &r.k, r.s, spare, try r.dev(u16, try sixtyFourths(r.a, xi)), try r.dev(u16, try sixtyFourths(r.a, wi)), bd, yd, rows, l.n, l.k);
+            const want = try r.a.alloc(u16, rows * l.n);
+            for (0..rows) |i| for (0..l.n) |j| {
+                var dot: i32 = 0;
+                for (xi[i * l.k ..][0..l.k], wi[j * l.k ..][0..l.k]) |p, q| dot += @as(i32, p) * q;
+                const acc: f32 = @as(f32, @floatFromInt(dot)) * 0x1p-12;
+                want[i * l.n + j] = gm.f32ToBf16(acc + bf(b[j]));
+            };
+            try r.near(name, rows, yd, want, 0);
+        }
+        const x = try r.bfs(rows * l.k, 2.0);
+        const xd = try r.dev(u16, x);
+        const wd = try r.dev(u16, try r.bfs(l.n * l.k, 0.05));
+        const accd = try r.zeros(f32, rows * l.n);
+        try vision.linear(&r.g, &r.k, r.s, spare, xd, wd, bd, yd, rows, l.n, l.k);
+        try r.g.run(r.s, xd, wd, accd, rows, l.n, l.k, .f32);
+        const acc = try r.get(f32, accd, rows * l.n);
+        const got = try r.get(u16, yd, rows * l.n);
+        var differ: usize = 0;
+        var far: usize = 0;
+        for (got, acc, 0..) |g, a, i| {
+            const want = gm.f32ToBf16(a + bf(b[i % l.n]));
+            differ += @intFromBool(g != want);
+            far += @intFromBool(!(@abs(bf(g) - bf(want)) <= 0x1p-7 * @abs(bf(want)) + 0x1p-12));
+        }
+        r.cases += 1;
+        std.debug.print("RESULT {s} rows {d} spread values: {d} of {d} elements differ from the f32 GEMM's sums + bias, {d} past a bf16 step\n", .{ name, rows, differ, got.len, far });
+        if (far != 0 or @as(f64, @floatFromInt(differ)) > linear_share * @as(f64, @floatFromInt(got.len))) r.bad += 1;
+    }
+}
+
+/// `v` as bf16 multiples of 2^-6.
+fn sixtyFourths(a: std.mem.Allocator, v: []const i8) ![]u16 {
+    const out = try a.alloc(u16, v.len);
+    for (out, v) |*o, x| o.* = gm.f32ToBf16(@as(f32, @floatFromInt(x)) * 0x1p-6);
+    return out;
 }
 
 /// The tower's attention call (Attention.full on its qkv rows) against f64 SDPA within each output's bound.
@@ -343,8 +413,9 @@ pub fn run(gpu: Gpu, model: ?[]const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     var prng = std.Random.DefaultPrng.init(0x5167_1192);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .k = try vision.Kernels.load(gpu.d), .at = try lfm2.attention.Attention.load(gpu.d), .rng = prng.random() };
+    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .k = try vision.Kernels.load(gpu.d), .at = try lfm2.attention.Attention.load(gpu.d), .g = try vision.Gemms.init(gpu.gpa, gpu.d), .rng = prng.random() };
     defer {
+        r.g.deinit();
         r.at.unload();
         r.k.unload();
         r.s.deinit();
@@ -353,7 +424,8 @@ pub fn run(gpu: Gpu, model: ?[]const u8) !void {
     }
     for (row_counts) |rows| {
         try normCases(&r, rows);
-        try biasCases(&r, rows);
+        try pointwiseCases(&r, rows);
+        try linearCases(&r, rows);
         try attentionCases(&r, rows);
     }
     try unshuffleCase(&r, 32, 32);

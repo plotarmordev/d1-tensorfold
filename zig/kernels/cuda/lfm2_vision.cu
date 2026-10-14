@@ -1,4 +1,4 @@
-// LFM2-VL's vision glue (families/lfm2/vision.zig): SigLIP2's LayerNorm, Linear epilogues, the projector's unshuffle.
+// LFM2-VL's vision glue (families/lfm2/vision.zig): SigLIP2's LayerNorm, GELU and residual adds, pixel unshuffle.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -72,13 +72,21 @@ extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_layer_norm(const __nv_
     }
 }
 
-// Block (row, column block): v = bf16(acc + bias), then bf16(gelu(v)) (act 1: tanh, 2: erf), then bf16(r + v) when R.
+// Block (row, column block): o = bf16(acc + bias), for a Linear whose cuBLASLt algorithm cannot fuse its bias.
 extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_bias(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
-                                                                 const __nv_bfloat16* R, __nv_bfloat16* O, int N, int act) {
+                                                                 __nv_bfloat16* __restrict__ O, int N) {
     const int c = blockIdx.y * NT + threadIdx.x;
     if (c >= N) return;
     const int64_t at = static_cast<int64_t>(blockIdx.x) * N + c;
-    float v = rbf(__fadd_rn(ACC[at], bf(BIAS[c])));
+    O[at] = __float2bfloat16_rn(__fadd_rn(ACC[at], bf(BIAS[c])));
+}
+
+// A Linear's bf16 output, its bias added: bf16(gelu(x)) (act 1 tanh, 2 erf), then bf16(r + x) when R.
+extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_pointwise(const __nv_bfloat16* X, const __nv_bfloat16* R, __nv_bfloat16* O,
+                                                                      int64_t count, int act) {
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
+    if (at >= count) return;
+    float v = bf(X[at]);
     if (act == 1) v = rbf(gelu_tanh(v));
     if (act == 2) v = rbf(gelu_erf(v));
     O[at] = __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);

@@ -15,12 +15,13 @@ const tiles_most = image.max_grid + 1; // max_tiles and the thumbnail
 const workspace_bytes = 32 << 20;
 const px_bytes = 2 * tiles_most * patches_most * image.patch_width; // a picture's bf16 patches, 256-byte aligned
 
-/// What tf_lfm2v_bias applies after the bias: nothing, torch's tanh GELU, or its exact (erf) GELU.
+/// What tf_lfm2v_pointwise applies to a Linear's output: nothing, torch's tanh GELU, or its exact (erf) GELU.
 pub const Act = enum(i32) { none = 0, gelu_tanh = 1, gelu = 2 };
 
 pub const Kernels = struct {
     mod: cuda.Module,
     layer_norm_fn: cuda.Function,
+    pointwise_fn: cuda.Function,
     bias_fn: cuda.Function,
     unshuffle_fn: cuda.Function,
 
@@ -31,6 +32,7 @@ pub const Kernels = struct {
         return .{
             .mod = mod,
             .layer_norm_fn = try mod.function("tf_lfm2v_layer_norm"),
+            .pointwise_fn = try mod.function("tf_lfm2v_pointwise"),
             .bias_fn = try mod.function("tf_lfm2v_bias"),
             .unshuffle_fn = try mod.function("tf_lfm2v_unshuffle"),
         };
@@ -50,12 +52,20 @@ pub const Kernels = struct {
         try go(k.layer_norm_fn, s, rows, 1, &a);
     }
 
-    /// o [rows, n] = bf16(acc + b) through `act`, then plus r when given (r may be o).
-    pub fn bias(k: *const Kernels, s: cuda.Stream, acc: u64, b: u64, r: ?u64, o: u64, rows: usize, n: usize, act: Act) !void {
+    /// o [count] = x (a Linear's bf16 output) through `act`, then plus r when given; x or r may be o.
+    pub fn pointwise(k: *const Kernels, s: cuda.Stream, x: u64, r: ?u64, o: u64, count: usize, act: Act) !void {
         var a: cuda.Args = .{};
-        for ([_]u64{ acc, b, r orelse 0, o }) |p| a.add(p);
-        a.add(int(n));
+        for ([_]u64{ x, r orelse 0, o }) |p| a.add(p);
+        a.add(@as(i64, @intCast(count)));
         a.add(@backingInt(act));
+        try go(k.pointwise_fn, s, blocks(count, threads), 1, &a);
+    }
+
+    /// o [rows, n] = bf16(acc + b), acc f32.
+    pub fn bias(k: *const Kernels, s: cuda.Stream, acc: u64, b: u64, o: u64, rows: usize, n: usize) !void {
+        var a: cuda.Args = .{};
+        for ([_]u64{ acc, b, o }) |p| a.add(p);
+        a.add(int(n));
         try go(k.bias_fn, s, rows, blocks(n, threads), &a);
     }
 
@@ -107,15 +117,32 @@ pub const Gemms = struct {
 
     /// y [rows, n] = x [rows, k] . w [n, k]^T, f32 accumulation, `out` rows.
     pub fn run(g: *Gemms, s: cuda.Stream, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize, out: cuda.cublaslt.DataType) !void {
-        const key = [3]u64{ rows, n, k | (@as(u64, @intCast(@backingInt(out))) << 48) };
+        try (try g.plan(rows, n, k, out, .none)).run(x, w, y, g.workspace.ptr, workspace_bytes, s.handle);
+    }
+
+    /// Whether the shape's own algorithm carries the bias in cuBLASLt's epilogue; else `linear` sums through f32.
+    pub fn fused(g: *Gemms, rows: usize, n: usize, k: usize) !bool {
+        return (try g.plan(rows, n, k, .bf16, .bias)).epilogue == .bias;
+    }
+
+    fn plan(g: *Gemms, rows: usize, n: usize, k: usize, out: cuda.cublaslt.DataType, epilogue: cuda.cublaslt.Epilogue) !*const Linear {
+        const key = [3]u64{ rows, n, k | @as(u64, @intCast(@backingInt(out))) << 40 | @as(u64, @backingInt(epilogue)) << 48 };
         const got = try g.plans.getOrPut(g.gpa, key);
-        if (!got.found_existing) got.value_ptr.* = Linear.init(&g.lt, rows, n, k, out, workspace_bytes) catch |e| {
+        if (!got.found_existing) got.value_ptr.* = Linear.initEpilogue(&g.lt, rows, n, k, out, workspace_bytes, epilogue) catch |e| {
             g.plans.removeByPtr(got.key_ptr);
             return e;
         };
-        try got.value_ptr.run(x, w, y, g.workspace.ptr, workspace_bytes, s.handle);
+        return got.value_ptr;
     }
 };
+
+/// y [rows, n] = bf16(x . w^T + b), the bias in cuBLASLt's epilogue, or else through f32 `acc` and tf_lfm2v_bias.
+pub fn linear(g: *Gemms, k: *const Kernels, s: cuda.Stream, acc: u64, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, kk: usize) !void {
+    const p = try g.plan(rows, n, kk, .bf16, .bias);
+    if (p.epilogue == .bias) return p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
+    try g.run(s, x, w, acc, rows, n, kk, .f32);
+    try k.bias(s, acc, b, y, rows, n);
+}
 
 /// a [rows, H D] = SDPA over one tile's rows (no mask), from qkv [rows, 3 H D] with its biases added.
 pub fn attention(at: *const Attention, s: cuda.Stream, qkv: u64, a: u64, rows: usize, heads: usize, dim: usize) !void {
@@ -158,7 +185,7 @@ pub const Vision = struct {
         const n = patches_most;
         const merged = 4 * c.hidden;
         const staged = [_]usize{ px_bytes, 2 * tiles_most * n * c.hidden };
-        // bf16 rows then the f32 Linear outputs
+        // bf16 rows: residual, normed and Linear outputs, wide Linears' outputs, the attention's; f32 unfused products
         const sizes = staged ++ [_]usize{
             2 * n * c.hidden,
             2 * n * @max(c.hidden, c.projector_hidden / 4),
@@ -236,31 +263,30 @@ pub const Vision = struct {
         const c = v.c;
         const b = v.b;
         const k = &v.k;
+        const g = &v.g;
         const w = v.w;
         const n = t.h * t.w;
         const hd = c.hidden;
-        try v.g.run(s, px, w.patch, b.acc, n, hd, image.patch_width, .f32);
-        try k.bias(s, b.acc, w.patch_bias, pos, b.h, n, hd, .none);
+        try linear(g, k, s, b.acc, px, w.patch, w.patch_bias, b.x, n, hd, image.patch_width);
+        try k.pointwise(s, b.x, pos, b.h, n * hd, .none);
         for (w.layers) |l| {
             try k.layerNorm(s, b.h, l.norm1, l.norm1_bias, b.x, n, hd, c.eps);
-            try v.g.run(s, b.x, l.qkv, b.acc, n, 3 * hd, hd, .f32);
-            try k.bias(s, b.acc, l.qkv_bias, null, b.wide, n, 3 * hd, .none);
+            try linear(g, k, s, b.acc, b.x, l.qkv, l.qkv_bias, b.wide, n, 3 * hd, hd);
             try attention(&v.at, s, b.wide, b.a, n, c.heads, hd / c.heads);
-            try v.g.run(s, b.a, l.out, b.acc, n, hd, hd, .f32);
-            try k.bias(s, b.acc, l.out_bias, b.h, b.h, n, hd, .none);
+            try linear(g, k, s, b.acc, b.a, l.out, l.out_bias, b.x, n, hd, hd);
+            try k.pointwise(s, b.x, b.h, b.h, n * hd, .none);
             try k.layerNorm(s, b.h, l.norm2, l.norm2_bias, b.x, n, hd, c.eps);
-            try v.g.run(s, b.x, l.fc1, b.acc, n, c.ffn, hd, .f32);
-            try k.bias(s, b.acc, l.fc1_bias, null, b.wide, n, c.ffn, .gelu_tanh);
-            try v.g.run(s, b.wide, l.fc2, b.acc, n, hd, c.ffn, .f32);
-            try k.bias(s, b.acc, l.fc2_bias, b.h, b.h, n, hd, .none);
+            try linear(g, k, s, b.acc, b.x, l.fc1, l.fc1_bias, b.wide, n, c.ffn, hd);
+            try k.pointwise(s, b.wide, null, b.wide, n * c.ffn, .gelu_tanh);
+            try linear(g, k, s, b.acc, b.wide, l.fc2, l.fc2_bias, b.x, n, hd, c.ffn);
+            try k.pointwise(s, b.x, b.h, b.h, n * hd, .none);
         }
         try k.layerNorm(s, b.h, w.post_norm, w.post_norm_bias, b.x, n, hd, c.eps);
         const tokens = n / 4;
         try k.unshuffle(s, b.x, b.wide, t.h, t.w, hd);
-        try v.g.run(s, b.wide, w.linear_1, b.acc, tokens, c.projector_hidden, 4 * hd, .f32);
-        try k.bias(s, b.acc, w.linear_1_bias, null, b.x, tokens, c.projector_hidden, .gelu);
-        try v.g.run(s, b.x, w.linear_2, b.acc, tokens, v.text_hidden, c.projector_hidden, .f32);
-        try k.bias(s, b.acc, w.linear_2_bias, null, out, tokens, v.text_hidden, .none);
+        try linear(g, k, s, b.acc, b.wide, w.linear_1, w.linear_1_bias, b.x, tokens, c.projector_hidden, 4 * hd);
+        try k.pointwise(s, b.x, null, b.x, tokens * c.projector_hidden, .gelu);
+        try linear(g, k, s, b.acc, b.x, w.linear_2, w.linear_2_bias, out, tokens, v.text_hidden, c.projector_hidden);
     }
 
     /// The position table resized to grid `t` (Siglip2VisionEmbeddings.resize_positional_embeddings), bf16 rows.

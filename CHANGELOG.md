@@ -2,6 +2,11 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- d1-3B (Liquid AI's LFM2-VL decision model) runs on CUDA in the native engine: `POST /v1/systemone` takes llama-server's System One request (a state, questions keyed by id of type `noul`, `choice` or `score`, and pictures as data URLs) and answers each question with probabilities and zero output tokens, one packed prompt pass a request with a branch a question. `/v1/decisions` scores through the same engine, and chat and completions are refused. Pictures are decoded (PNG and JPEG) and tiled as the LFM2-VL processor does, and the SigLIP2 tower and projector run on the GPU. On a GB10 against the Python 0.6 engine's d1 recipe, the 48 text requests and one picture of the recipe's parity set gave the same top answer on all 99 questions, within 0.021 in probability; one question took 24.7 ms against 25.3 ms, three questions 27.7 against 28.7, a 3,446-token state 261 against 273, a picture 44.8 against 44.7, and 64 packed states 40.7 a second against 38.5.
+- The native tokenizer reads an ASCII bracket class inside `(?i:...)`, folded to its case variants (LFM2's pre-tokenizer splits `'S` and `'LL` as the tokenizers library does).
+
 ## 1.0.10
 
 - `cortheon_fetch` reads only URLs the conversation has already shown: search results, links on pages it has read, and URLs in the user's, the system prompt's or a tool's messages, never one that appears only in the model's replies, so a page that steers the model cannot make it build a URL that carries conversation text. The one exception is one named package's registry JSON on PyPI, npm or crates.io, a name of at most 64 characters. A refused fetch tells the model to search for the page. The `cortheon` object's `pages_read` now counts only pages read, not refused or failed fetches.

@@ -106,8 +106,7 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
 
 const Seen = struct { urls: []const []const u8, state: Value };
 
-/// The request's pictures (files, images, then a chat state's image parts) and the state without them, as
-/// llama-server reads a System One state; other media are refused.
+/// The pictures (files, images, then the state's image parts) and the state without them; other media refused.
 fn pictures(cx: *Cx, body: Value, state: Value) errors.Refused!Seen {
     var urls: std.ArrayList([]const u8) = .empty;
     for ([_][]const u8{ "files", "images" }) |key| if (body.get(key)) |v| switch (v) {

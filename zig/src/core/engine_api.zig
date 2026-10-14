@@ -231,7 +231,6 @@ pub const Open = struct {
     policy: []const u8 = "",
 };
 
-/// An opened engine; ``close`` stops its thread and frees its backend.
 /// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
 pub const Decision = struct {
     trunk: []const u32,
@@ -245,6 +244,7 @@ pub const Decision = struct {
     problem: []const u8 = "", // out: why the engine refused (error.Refused)
 };
 
+/// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0 };

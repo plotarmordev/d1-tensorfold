@@ -1,7 +1,7 @@
 # d1-3B on TensorFold — DGX Spark recipe
 
 Serve [Liquid AI's d1-3B](https://huggingface.co/LiquidAI/d1-3B) on one NVIDIA DGX Spark using
-[TensorFold's Python 0.6 engine](https://github.com/ashhart/TensorFold/tree/python-0.6), not the separate native 1.x engine.
+[TensorFold's Python 0.6 engine](https://github.com/ashhart/TensorFold/tree/ed78d6fc204d89d90b045bf033d6551e7714f3a1) (the pinned commit this recipe builds), not the separate native 1.x engine.
 This private repository carries the audited LFM2 CUDA implementation, digest-pinned container build,
 launchers, checkpoint checksums and retained performance evidence.
 

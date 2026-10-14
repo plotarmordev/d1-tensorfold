@@ -61,7 +61,9 @@ __global__ void __launch_bounds__(32 * WARPS, 1)
 pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
              const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
              int G, float scale) {
+    constexpr bool causal = true;
     constexpr int skip = 0;
+    const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
 #include "prefill_attention_rows.cuh"
 }
@@ -72,6 +74,8 @@ __device__ __forceinline__ void
 pattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
            const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
            int G, float scale, int first, int skip) {
+    constexpr bool causal = true;
+    const int HO = H;
     auto first_row = [=] { return first; };
 #include "prefill_attention_rows.cuh"
 }
@@ -94,6 +98,20 @@ tree_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict
                                   b < 0 ? 0 : cu[b]);
 }
 
+// One sequence, every row over every key (no mask), a block a head: q, k, v heads of qkv [W, 3 HO D] -> out [W, HO D].
+template <int D, int WARPS, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+full_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ out, int W, int HO, float scale) {
+    constexpr int HPC = 1, G = 1, p0 = 0, skip = 0;
+    constexpr bool causal = false;
+    const int H = 3 * HO, HK = H;
+    const __nv_bfloat16* __restrict__ q = qkv;
+    const __nv_bfloat16* __restrict__ kc = qkv + HO * D;
+    const __nv_bfloat16* __restrict__ vc = qkv + 2 * HO * D;
+    auto first_row = [] { return blockIdx.x * 16 * WARPS; };
+#include "prefill_attention_rows.cuh"
+}
+
 } // namespace tf_prefill_attention
 
 // Head dim 128, eight warps, eight query heads a block, eight staging slots (Nemotron's 16 heads a KV head).
@@ -102,3 +120,6 @@ template __global__ void tf_prefill_attention::pattn_kernel<128, 8, 8, 8>(const 
 // Head dim 64, eight warps, four query heads a block, eight staging slots (LFM2's 4 heads a KV head, causal or trees).
 template __global__ void tf_prefill_attention::tree_kernel<64, 8, 4, 8>(const __nv_bfloat16*,
     const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, const int*, int, int, int, int, int, float);
+// Head dim 72, eight warps of one head, eight staging slots (SigLIP2's tower, 72 dims padded to 80 inside).
+template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_bfloat16*, __nv_bfloat16*, int, int,
+    float);

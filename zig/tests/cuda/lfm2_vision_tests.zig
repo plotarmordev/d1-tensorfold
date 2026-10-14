@@ -24,10 +24,6 @@ const sum_tolerance = 0.17; // every row's sum
 const row_tolerance = 0.035; // the picked rows whole
 const cos_least = 0.998; // each picked row's cosine similarity
 const gelu_share = 0.15; // GELU elements off: 2-ulp tanhf and erff flip bf16 roundings in the cancelling negative tail
-// Attention against f64 SDPA: bf16 output rounding (2^-8 relative), plus f32 score, softmax and value-sum error.
-const attention_tolerance = 0x1p-8; // times |want|
-const attention_slack = 0x1p-10; // the f32 error's bound for |q|, |k|, |v| < 2, 72 dims and up to 1024 keys
-const attention_scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, dim))); // vision.attention's
 
 extern fn erf(x: f64) f64;
 
@@ -97,34 +93,8 @@ fn bias(acc: []const f32, b: []const u16, r: ?[]const u16, o: []u16, n: usize, a
     }
 }
 
-/// tf_lfm2v_attend: each row's f32 softmax (key j in lane j mod 32, then butterflies), an fma chain over the keys.
-fn attend(scores: []const f32, qkv: []const u16, out: []u16, rows: usize, ss: usize, scale: f32) void {
-    const w = 3 * heads * dim;
-    var p: [1024]f32 = undefined;
-    for (0..heads) |h| for (0..rows) |i| {
-        const s = scores[h * ss + i * rows ..][0..rows];
-        var m = -std.math.inf(f32);
-        for (s, p[0..rows]) |x, *y| {
-            y.* = x * scale;
-            m = @max(m, y.*);
-        }
-        var lanes: [32]f32 = @splat(0);
-        for (p[0..rows], 0..) |*y, j| {
-            y.* = gm.exp(y.* - m);
-            lanes[j % 32] += y.*;
-        }
-        const sum = warpSum(&lanes);
-        for (p[0..rows]) |*y| y.* /= sum;
-        for (0..dim) |d| {
-            var o: f32 = 0;
-            for (p[0..rows], 0..) |pj, j| o = gm.fma(pj, bf(qkv[j * w + 2 * heads * dim + h * dim + d]), o);
-            out[i * heads * dim + h * dim + d] = gm.f32ToBf16(o);
-        }
-    };
-}
-
-/// SDPA in f64 over bf16 q, k, v rows of qkv [rows, 3 H D] -> [rows, H D].
-fn attention(qkv: []const u16, out: []f64, rows: usize) void {
+/// SDPA in f64 over qkv [rows, 3 H D] -> [rows, H D]; bound: one bf16 rounding of each output, two of each probability.
+fn attention(qkv: []const u16, out: []f64, bound: []f64, rows: usize) void {
     const w = 3 * heads * dim;
     const scale = 1.0 / @sqrt(@as(f64, dim));
     var e: [1024]f64 = undefined;
@@ -143,8 +113,15 @@ fn attention(qkv: []const u16, out: []f64, rows: usize) void {
         }
         for (0..dim) |d| {
             var acc: f64 = 0;
-            for (0..rows) |j| acc += e[j] * bf(qkv[j * w + 2 * heads * dim + h * dim + d]);
-            out[i * heads * dim + h * dim + d] = acc / sum;
+            var mag: f64 = 0;
+            for (0..rows) |j| {
+                const v = bf(qkv[j * w + 2 * heads * dim + h * dim + d]);
+                acc += e[j] * v;
+                mag += e[j] * @abs(v);
+            }
+            const at = i * heads * dim + h * dim + d;
+            out[at] = acc / sum;
+            bound[at] = (@abs(out[at]) + 2 * mag / sum) / 256;
         }
     };
 }
@@ -154,7 +131,7 @@ const Rig = struct {
     a: std.mem.Allocator, // host data, freed together at the end
     s: cuda.Stream,
     k: vision.Kernels,
-    g: vision.Gemms,
+    at: lfm2.attention.Attention,
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -238,61 +215,24 @@ fn biasCases(r: *Rig, rows: usize) !void {
     };
 }
 
-/// The head split byte for byte, tf_lfm2v_attend against its mirror, then the whole attention against f64.
+/// The tower's attention call (Attention.full on its qkv rows) against f64 SDPA within each output's bound.
 fn attentionCases(r: *Rig, rows: usize) !void {
-    const st = vision.Strides.of(rows, dim);
     const qkv = try r.bfs(rows * 3 * heads * dim, 2.0);
-    const qkvd = try r.dev(u16, qkv);
-    const hb: vision.Heads = .{ .q = try r.zeros(u16, heads * st.hs), .k = try r.zeros(u16, heads * st.hs), .scores = try r.zeros(f32, heads * st.ss) };
-    try r.k.splitHeads(r.s, qkvd, hb.q, hb.k, rows, heads, dim, st.hs);
-    const q = try r.a.alloc(u16, heads * st.hs);
-    const k = try r.a.alloc(u16, heads * st.hs);
-    for ([_][]u16{ q, k }) |m| @memset(m, 0);
-    for (0..rows) |i| for (0..heads) |h| for (0..dim) |d| {
-        const at = i * 3 * heads * dim + h * dim + d;
-        q[h * st.hs + i * dim + d] = qkv[at];
-        k[h * st.hs + i * dim + d] = qkv[at + heads * dim];
-    };
-    try r.near("split_heads q", rows, hb.q, q, 0);
-    try r.near("split_heads k", rows, hb.k, k, 0);
-    const scores = try r.f32s(heads * st.ss, 30.0);
     const ad = try r.zeros(u16, rows * heads * dim);
-    try r.k.attend(r.s, try r.dev(f32, scores), qkvd, ad, rows, heads, dim, st.ss, 0.125);
-    const mirrored = try r.a.alloc(u16, rows * heads * dim);
-    attend(scores, qkv, mirrored, rows, st.ss, 0.125);
-    try r.near("attend", rows, ad, mirrored, 0);
-    try vision.attention(&r.k, &r.g, r.s, hb, qkvd, ad, rows, heads, dim);
-    // QK^T: exact bf16 products summed in f32 in any order, so each score is within (D + 1) 2^-24 sum |q k| of the dot
-    const own_scores = try r.get(f32, hb.scores, heads * st.ss);
-    var score_far: usize = 0;
-    for (0..heads) |h| for (0..rows) |i| for (0..rows) |j| {
-        var dot: f64 = 0;
-        var mag: f64 = 0;
-        for (0..dim) |d| {
-            const x = @as(f64, bf(q[h * st.hs + i * dim + d])) * bf(k[h * st.hs + j * dim + d]);
-            dot += x;
-            mag += @abs(x);
-        }
-        score_far += @intFromBool(!(@abs(own_scores[h * st.ss + i * rows + j] - dot) <= (dim + 1) * 0x1p-24 * mag));
-    };
-    r.cases += 1;
-    std.debug.print("RESULT attention scores rows {d}: {d} of {d} past (D + 1) 2^-24 sum |q k|\n", .{ rows, score_far, heads * rows * rows });
-    if (score_far != 0) r.bad += 1;
-    const own = try r.a.alloc(u16, rows * heads * dim);
-    attend(own_scores, qkv, own, rows, st.ss, attention_scale);
-    try r.near("attention on its own scores", rows, ad, own, 0);
+    try vision.attention(&r.at, r.s, try r.dev(u16, qkv), ad, rows, heads, dim);
     const got = try r.get(u16, ad, rows * heads * dim);
     const want = try r.a.alloc(f64, rows * heads * dim);
-    attention(qkv, want, rows);
+    const bound = try r.a.alloc(f64, rows * heads * dim);
+    attention(qkv, want, bound, rows);
     var worst: f64 = 0;
     var far: usize = 0;
-    for (got, want) |g, w| {
+    for (got, want, bound) |g, w, b| {
         const err = @abs(bf(g) - w);
-        worst = @max(worst, err);
-        far += @intFromBool(!(err <= attention_tolerance * @abs(w) + attention_slack));
+        worst = @max(worst, err / b);
+        far += @intFromBool(!(err <= b));
     }
     r.cases += 1;
-    std.debug.print("RESULT attention rows {d}: max abs error {e} against f64, {d} past 2^-8 |want| + 2^-10\n", .{ rows, worst, far });
+    std.debug.print("RESULT attention rows {d}: worst error {d:.3} of its bound against f64, {d} past it\n", .{ rows, worst, far });
     if (far != 0) r.bad += 1;
 }
 
@@ -403,9 +343,9 @@ pub fn run(gpu: Gpu, model: ?[]const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     var prng = std.Random.DefaultPrng.init(0x5167_1192);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .k = try vision.Kernels.load(gpu.d), .g = try vision.Gemms.init(gpu.gpa, gpu.d), .rng = prng.random() };
+    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .k = try vision.Kernels.load(gpu.d), .at = try lfm2.attention.Attention.load(gpu.d), .rng = prng.random() };
     defer {
-        r.g.deinit();
+        r.at.unload();
         r.k.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();

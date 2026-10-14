@@ -1,23 +1,24 @@
-// pattn_kernel's and pattn_rows' body: q, kc, vc, out, p0, W, H, HK, G, scale, skip and first_row() in scope.
-    constexpr int C = D / 8, K16 = D / 16, NB = D / 8, RB = WARPS / HPC, THREADS = 32 * WARPS;
+// The kernels' body; in scope: q, kc, vc, out, p0, W, H, HK, G, HO, scale, skip, causal and first_row().
+    constexpr int C = D / 8, K16 = (D + 15) / 16, NB = 2 * K16;  // the head's 16-byte chunks, 16-dim steps, 8-dim tiles
+    constexpr int CS = (NB + 7) / 8 * 8, RB = WARPS / HPC, THREADS = 32 * WARPS;  // CS: a staged key row's chunks
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
     extern __shared__ uint4 smem[];
     uint4* slots = smem;
-    uint4* qs = smem + NS * HALF * C;
+    uint4* qs = smem + NS * HALF * CS;
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, qd = lane % 4, mt = lane / 8;
     const int groups = G / HPC, hk = blockIdx.y / groups, hg = blockIdx.y % groups;
     const int row0 = first_row(), last = min(row0 + 16 * RB, W) - 1;
     const int head = hk * G + hg * HPC + warp % HPC, wrow = row0 + (warp / HPC) * 16;
-    const int tiles = (p0 + last) / BN + 1, items = 4 * tiles, limit = p0 + W;
+    const int tiles = (p0 + (causal ? last : W - 1)) / BN + 1, items = 4 * tiles, limit = p0 + W;
     auto stage = [&](int item) {
         const __nv_bfloat16* src = item % 4 < 2 ? kc : vc;
         const int key0 = (item / 4) * BN + (item % 2) * HALF;
-        uint4* dst = slots + (item % NS) * HALF * C;
-        for (int i = threadIdx.x; i < HALF * C; i += THREADS) {
-            const int key = key0 + i / C;
-            const bool in = key < limit;             // past the cache's filled keys: zeros, never read
+        uint4* dst = slots + (item % NS) * HALF * CS;
+        for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
+            const int key = key0 + i / NB, chunk = i % NB;
+            const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
             const int row = in ? key + (key < p0 ? 0 : skip) : 0;
-            cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)row * HK + hk) * D + (i % C) * 8, in);
+            cp16z(dst + sw<8 * CS>(i / NB, chunk), src + ((int64_t)row * HK + hk) * D + chunk * 8, in);
         }
     };
     uint32_t qa[QREG ? K16 : 1][4];
@@ -29,14 +30,14 @@
         for (int k = 0; k < K16; ++k) {
             qa[k][0] = r0 < W ? q0[8 * k + qd] : 0u;
             qa[k][1] = r1 < W ? q1[8 * k + qd] : 0u;
-            qa[k][2] = r0 < W ? q0[8 * k + qd + 4] : 0u;
-            qa[k][3] = r1 < W ? q1[8 * k + qd + 4] : 0u;
+            qa[k][2] = r0 < W && 16 * k + 8 < D ? q0[8 * k + qd + 4] : 0u;
+            qa[k][3] = r1 < W && 16 * k + 8 < D ? q1[8 * k + qd + 4] : 0u;
         }
     } else {
         for (int i = threadIdx.x; i < WARPS * 16 * C; i += THREADS) {
             const int w = i / (16 * C), r = (i / C) % 16, row = row0 + (w / HPC) * 16 + r;
             const int hd = hk * G + hg * HPC + w % HPC;
-            cp16z(qs + sw<D>(i / C, i % C), q + ((int64_t)min(row, W - 1) * H + hd) * D + (i % C) * 8, row < W);
+            cp16z(qs + sw<8 * CS>(i / C, i % C), q + ((int64_t)min(row, W - 1) * H + hd) * D + (i % C) * 8, row < W);
         }
         commit();
     }
@@ -51,11 +52,11 @@
     float sc[8][4];
     uint32_t pa[4][4];
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
-    const int pos0 = p0 + wrow + g, pos1 = pos0 + 8;
+    const int pos0 = causal ? p0 + wrow + g : limit - 1, pos1 = causal ? pos0 + 8 : pos0;
     auto take = [&](int it) -> const uint4* {           // item it's slot, once every thread's copy has landed
         wait_group<NS - 1>();
         __syncthreads();
-        return slots + (it % NS) * HALF * C;
+        return slots + (it % NS) * HALF * CS;
     };
     auto done = [&](int it) {                            // the slot is free: stage the item NS ahead into it
         __syncthreads();
@@ -69,12 +70,12 @@
             if constexpr (QREG) {
                 a[0] = qa[k][0]; a[1] = qa[k][1]; a[2] = qa[k][2]; a[3] = qa[k][3];
             } else {
-                ldmatrix4(a, qs + sw<D>(warp * 16 + lane % 16, 2 * k + lane / 16));
+                ldmatrix4(a, qs + sw<8 * CS>(warp * 16 + lane % 16, 2 * k + lane / 16));
             }
 #pragma unroll
             for (int n = 0; n < 4; n += 2) {
                 uint32_t b[4];
-                ldmatrix4(b, sl + sw<D>(8 * (n + mt / 2) + lane % 8, 2 * k + mt % 2));
+                ldmatrix4(b, sl + sw<8 * CS>(8 * (n + mt / 2) + lane % 8, 2 * k + mt % 2));
                 if (k == 0) {
                     mma0(s[n], a, b[0], b[1]);
                     mma0(s[n + 1], a, b[2], b[3]);
@@ -89,14 +90,14 @@
 #pragma unroll
         for (int i = 0; i < NB; i += 2) {
             uint32_t b[4];
-            ldmatrix4t(b, sl + sw<D>(8 * (mt % 2) + lane % 8, i + mt / 2));
+            ldmatrix4t(b, sl + sw<8 * CS>(8 * (mt % 2) + lane % 8, i + mt / 2));
             mma(o[i], pa0, b[0], b[1]);
             mma(o[i + 1], pa0, b[2], b[3]);
         }
 #pragma unroll
         for (int i = 0; i < NB; i += 2) {
             uint32_t b[4];
-            ldmatrix4t(b, sl + sw<D>(16 + 8 * (mt % 2) + lane % 8, i + mt / 2));
+            ldmatrix4t(b, sl + sw<8 * CS>(16 + 8 * (mt % 2) + lane % 8, i + mt / 2));
             mma(o[i], pa1, b[0], b[1]);
             mma(o[i + 1], pa1, b[2], b[3]);
         }
@@ -166,12 +167,12 @@
     wait_group<0>();
     const int r0 = wrow + g, r1 = r0 + 8;
 #pragma unroll
-    for (int i = 0; i < NB; ++i) {
+    for (int i = 0; i < C; ++i) {
         const int d = 8 * i + 2 * qd;
         if (r0 < W)
-            *reinterpret_cast<uint32_t*>(out + ((int64_t)r0 * H + head) * D + d) =
+            *reinterpret_cast<uint32_t*>(out + ((int64_t)r0 * HO + head) * D + d) =
                 pack(tdiv(o[i][0], l0), tdiv(o[i][1], l0));
         if (r1 < W)
-            *reinterpret_cast<uint32_t*>(out + ((int64_t)r1 * H + head) * D + d) =
+            *reinterpret_cast<uint32_t*>(out + ((int64_t)r1 * HO + head) * D + d) =
                 pack(tdiv(o[i][2], l1), tdiv(o[i][3], l1));
     }

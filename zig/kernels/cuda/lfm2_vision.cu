@@ -1,4 +1,4 @@
-// LFM2-VL's vision glue (families/lfm2/vision.zig): SigLIP2's LayerNorm, Linear epilogues, attention heads, unshuffle.
+// LFM2-VL's vision glue (families/lfm2/vision.zig): SigLIP2's LayerNorm, Linear epilogues, the projector's unshuffle.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -12,11 +12,6 @@ namespace {
 
 constexpr int NT = 256;    // threads a row block
 constexpr int MAXE = 8;    // elements a thread holds: LayerNorm rows up to NT * MAXE = 2048 wide
-constexpr int AR = 8;      // query rows an attention block takes, a warp each
-constexpr int KMAX = 1024; // keys a query row sees
-constexpr int VC = 32;     // keys a value chunk stages
-constexpr int DMAX = 128;  // head dims a value chunk stages
-constexpr int OUTS = AR * DMAX / NT;  // outputs a thread accumulates
 
 // A block's values summed: warp butterflies, then the warps in order; every thread gets the sum.
 __device__ __forceinline__ float block_sum(float v, float* red) {
@@ -27,12 +22,6 @@ __device__ __forceinline__ float block_sum(float v, float* red) {
     for (int w = 1; w < NT / 32; ++w) s = __fadd_rn(s, red[w]);
     __syncthreads();
     return s;
-}
-
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
-    return v;
 }
 
 // torch's GELU kernels in fp32: the tanh approximation, and the exact form through erf.
@@ -93,63 +82,6 @@ extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_bias(const float* __re
     if (act == 1) v = rbf(gelu_tanh(v));
     if (act == 2) v = rbf(gelu_erf(v));
     O[at] = __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
-}
-
-// Block a row: its q and k heads of qkv [rows, 3 H D] to [H][rows][D], heads hs apart.
-extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_split_heads(const __nv_bfloat16* __restrict__ QKV, __nv_bfloat16* __restrict__ Q,
-                                                                        __nv_bfloat16* __restrict__ K, int H, int D, int64_t hs) {
-    const int64_t r = blockIdx.x;
-    const __nv_bfloat16* src = QKV + r * 3 * H * D;
-    for (int i = threadIdx.x; i < H * D; i += NT) {
-        const int64_t at = (i / D) * hs + r * D + i % D;
-        Q[at] = src[i];
-        K[at] = src[H * D + i];
-    }
-}
-
-// Block (8 query rows, head), a warp a row: p = softmax(s * scale) kept f32, a = bf16(sum_j p_j v_j) into [rows, H D].
-extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_attend(const float* __restrict__ S, const __nv_bfloat16* __restrict__ QKV,
-                                                                   __nv_bfloat16* __restrict__ A, int rows, int H, int D, int64_t ss, float scale) {
-    __shared__ float p[AR][KMAX];
-    __shared__ __nv_bfloat16 vs[VC][DMAX];
-    const int h = blockIdx.y, r0 = blockIdx.x * AR, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    if (r0 + warp < rows) {
-        const float* s = S + h * ss + static_cast<int64_t>(r0 + warp) * rows;
-        float* pr = p[warp];
-        float m = -INFINITY;
-        for (int j = lane; j < rows; j += 32) {
-            pr[j] = __fmul_rn(s[j], scale);
-            m = fmaxf(m, pr[j]);
-        }
-        m = warp_max(m);
-        float acc = 0.0f;
-        for (int j = lane; j < rows; j += 32) {
-            pr[j] = tf_exp(__fsub_rn(pr[j], m));
-            acc = __fadd_rn(acc, pr[j]);
-        }
-        const float sum = warp_sum(acc);
-        for (int j = lane; j < rows; j += 32) pr[j] = __fdiv_rn(pr[j], sum);
-    }
-    const int64_t width = 3 * static_cast<int64_t>(H) * D;
-    const __nv_bfloat16* v = QKV + 2 * H * D + h * D;
-    float o[OUTS] = {};
-    for (int j0 = 0; j0 < rows; j0 += VC) {
-        const int n = min(VC, rows - j0);
-        __syncthreads();
-        for (int i = threadIdx.x; i < n * D; i += NT) vs[i / D][i % D] = v[(j0 + i / D) * width + i % D];
-        __syncthreads();
-#pragma unroll
-        for (int k = 0; k < OUTS; ++k) {
-            const int at = threadIdx.x + k * NT, r = at / D, d = at % D;
-            if (at >= AR * D || r0 + r >= rows) continue;
-            for (int j = 0; j < n; ++j) o[k] = __fmaf_rn(p[r][j0 + j], bf(vs[j][d]), o[k]);
-        }
-    }
-#pragma unroll
-    for (int k = 0; k < OUTS; ++k) {
-        const int at = threadIdx.x + k * NT, r = r0 + at / D;
-        if (at < AR * D && r < rows) A[static_cast<int64_t>(r) * H * D + h * D + at % D] = __float2bfloat16_rn(o[k]);
-    }
 }
 
 // Block an output row (i, j) of an h x w grid: rows (2i, 2j), (2i, 2j+1), (2i+1, 2j), (2i+1, 2j+1) side by side.

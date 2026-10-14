@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const config = @import("config.zig");
+const Attention = @import("attention.zig").Attention;
 const VisionWeights = @import("weights.zig").VisionWeights;
 const image = @import("image.zig");
 const Allocator = std.mem.Allocator;
@@ -9,10 +10,7 @@ const Linear = cuda.cublaslt.Linear;
 
 const threads = 256; // lfm2_vision.cu's NT
 const norm_most = 8 * threads; // NT * MAXE
-const keys_most = 1024; // KMAX
-const attend_rows = 8; // AR
-const dim_most = 128; // DMAX
-const patches_most = keys_most; // a 512-pixel tile, or a thumbnail of at most 256 tokens
+const patches_most = 1024; // a 512-pixel tile, or a thumbnail of at most 256 tokens
 const tiles_most = image.max_grid + 1; // max_tiles and the thumbnail
 const workspace_bytes = 32 << 20;
 const px_bytes = 2 * tiles_most * patches_most * image.patch_width; // a picture's bf16 patches, 256-byte aligned
@@ -24,8 +22,6 @@ pub const Kernels = struct {
     mod: cuda.Module,
     layer_norm_fn: cuda.Function,
     bias_fn: cuda.Function,
-    split_fn: cuda.Function,
-    attend_fn: cuda.Function,
     unshuffle_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
@@ -36,8 +32,6 @@ pub const Kernels = struct {
             .mod = mod,
             .layer_norm_fn = try mod.function("tf_lfm2v_layer_norm"),
             .bias_fn = try mod.function("tf_lfm2v_bias"),
-            .split_fn = try mod.function("tf_lfm2v_split_heads"),
-            .attend_fn = try mod.function("tf_lfm2v_attend"),
             .unshuffle_fn = try mod.function("tf_lfm2v_unshuffle"),
         };
     }
@@ -63,26 +57,6 @@ pub const Kernels = struct {
         a.add(int(n));
         a.add(@backingInt(act));
         try go(k.bias_fn, s, rows, blocks(n, threads), &a);
-    }
-
-    /// qkv [rows, 3 H D] -> q and k [H][rows][D], heads `hs` elements apart.
-    pub fn splitHeads(k: *const Kernels, s: cuda.Stream, qkv: u64, q: u64, kk: u64, rows: usize, heads: usize, dim: usize, hs: usize) !void {
-        var a: cuda.Args = .{};
-        for ([_]u64{ qkv, q, kk }) |p| a.add(p);
-        for ([_]usize{ heads, dim }) |v| a.add(int(v));
-        a.add(@as(i64, @intCast(hs)));
-        try go(k.split_fn, s, rows, 1, &a);
-    }
-
-    /// a [rows, H D] = softmax(scores * scale) . v in f32: scores [H][rows][rows] ss apart, v in qkv; rows <= 1024.
-    pub fn attend(k: *const Kernels, s: cuda.Stream, scores: u64, qkv: u64, a_: u64, rows: usize, heads: usize, dim: usize, ss: usize, scale: f32) !void {
-        if (rows > keys_most or dim > dim_most) return error.RowShape;
-        var a: cuda.Args = .{};
-        for ([_]u64{ scores, qkv, a_ }) |p| a.add(p);
-        for ([_]usize{ rows, heads, dim }) |v| a.add(int(v));
-        a.add(@as(i64, @intCast(ss)));
-        a.add(scale);
-        try go(k.attend_fn, s, blocks(rows, attend_rows), heads, &a);
     }
 
     /// y [h/2 * w/2, 4c] = the projector's pixel unshuffle of x [h * w, c], an even grid.
@@ -143,26 +117,10 @@ pub const Gemms = struct {
     }
 };
 
-/// Elements between heads, each head 256-byte aligned as cuBLASLt's default plans assume its operands.
-pub const Strides = struct {
-    hs: usize, // q and k: bf16
-    ss: usize, // scores: f32
-
-    pub fn of(rows: usize, dim: usize) Strides {
-        return .{ .hs = std.mem.alignForward(usize, rows * dim, 128), .ss = std.mem.alignForward(usize, rows * rows, 64) };
-    }
-};
-
-/// One tile's attention scratch, laid out by `Strides.of(rows, dim)`.
-pub const Heads = struct { q: u64, k: u64, scores: u64 };
-
 /// a [rows, H D] = SDPA over one tile's rows (no mask), from qkv [rows, 3 H D] with its biases added.
-pub fn attention(k: *const Kernels, g: *Gemms, s: cuda.Stream, b: Heads, qkv: u64, a: u64, rows: usize, heads: usize, dim: usize) !void {
-    const st = Strides.of(rows, dim);
+pub fn attention(at: *const Attention, s: cuda.Stream, qkv: u64, a: u64, rows: usize, heads: usize, dim: usize) !void {
     const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim))));
-    try k.splitHeads(s, qkv, b.q, b.k, rows, heads, dim, st.hs);
-    for (0..heads) |h| try g.run(s, b.q + 2 * h * st.hs, b.k + 2 * h * st.hs, b.scores + 4 * h * st.ss, rows, rows, dim, .f32);
-    try k.attend(s, b.scores, qkv, a, rows, heads, dim, st.ss, scale);
+    try at.full(s, qkv, a, rows, heads, dim, scale);
 }
 
 pub const Vision = struct {
@@ -170,22 +128,25 @@ pub const Vision = struct {
     text_hidden: usize,
     w: *const VisionWeights,
     k: Kernels,
+    at: Attention,
     g: Gemms,
     position: []f32, // the position table [side, side, hidden] on the host, resized for each tile's grid
     scratch: cuda.DeviceBuffer,
     staging: cuda.HostBuffer, // pinned: a picture's bf16 patches, then its tiles' position rows
     b: Buffers,
 
-    const Buffers = struct { px: u64, pos: u64, h: u64, x: u64, wide: u64, a: u64, acc: u64, heads: Heads };
+    const Buffers = struct { px: u64, pos: u64, h: u64, x: u64, wide: u64, a: u64, acc: u64 };
 
-    /// Kernels, cuBLASLt and scratch for one picture of up to 11 tiles of 1024 patches.
+    /// Kernels, attention, cuBLASLt and scratch for one picture of up to 11 tiles of 1024 patches.
     pub fn init(gpa: Allocator, d: *const cuda.Driver, cfg: *const config.Config, w: *const VisionWeights) !Vision {
         const c = cfg.vision orelse return error.NoVisionTower;
         const dim = c.hidden / c.heads;
         const side = std.math.sqrt(c.num_patches);
-        if (dim * c.heads != c.hidden or dim > dim_most or c.hidden > norm_most or c.downsample != 2 or side * side != c.num_patches or c.channels * c.patch * c.patch != image.patch_width) return error.VisionShape;
+        if (dim * c.heads != c.hidden or c.hidden > norm_most or c.downsample != 2 or side * side != c.num_patches or c.channels * c.patch * c.patch != image.patch_width) return error.VisionShape;
         var k = try Kernels.load(d);
         errdefer k.unload();
+        var attn = try Attention.load(d);
+        errdefer attn.unload();
         var g = try Gemms.init(gpa, d);
         errdefer g.deinit();
         const position = try gpa.alloc(f32, c.num_patches * c.hidden);
@@ -195,19 +156,15 @@ pub const Vision = struct {
         try d.check(d.api.cuMemcpyDtoH_v2(table.ptr, w.position, 2 * table.len), "cuMemcpyDtoH");
         for (position, table) |*p, t| p.* = @bitCast(@as(u32, t) << 16);
         const n = patches_most;
-        const st = Strides.of(n, dim);
         const merged = 4 * c.hidden;
         const staged = [_]usize{ px_bytes, 2 * tiles_most * n * c.hidden };
-        // bf16 rows then the f32 Linear outputs, then the attention's q and k heads and f32 scores
+        // bf16 rows then the f32 Linear outputs
         const sizes = staged ++ [_]usize{
             2 * n * c.hidden,
             2 * n * @max(c.hidden, c.projector_hidden / 4),
             2 * n * @max(3 * c.hidden, c.ffn, merged / 4),
             2 * n * c.hidden,
             4 * n * @max(3 * c.hidden, c.ffn, @max(c.projector_hidden, cfg.hidden) / 4),
-            2 * c.heads * st.hs,
-            2 * c.heads * st.hs,
-            4 * c.heads * st.ss,
         };
         var total: usize = 0;
         for (sizes) |sz| total += std.mem.alignForward(usize, sz, 256);
@@ -224,11 +181,12 @@ pub const Vision = struct {
             .text_hidden = cfg.hidden,
             .w = w,
             .k = k,
+            .at = attn,
             .g = g,
             .position = position,
             .scratch = scratch,
             .staging = try cuda.HostBuffer.alloc(d, px_bytes + staged[1]),
-            .b = .{ .px = at[0], .pos = at[1], .h = at[2], .x = at[3], .wide = at[4], .a = at[5], .acc = at[6], .heads = .{ .q = at[7], .k = at[8], .scores = at[9] } },
+            .b = .{ .px = at[0], .pos = at[1], .h = at[2], .x = at[3], .wide = at[4], .a = at[5], .acc = at[6] },
         };
     }
 
@@ -237,6 +195,7 @@ pub const Vision = struct {
         v.scratch.free();
         v.g.gpa.free(v.position);
         v.g.deinit();
+        v.at.unload();
         v.k.unload();
     }
 
@@ -286,7 +245,7 @@ pub const Vision = struct {
             try k.layerNorm(s, b.h, l.norm1, l.norm1_bias, b.x, n, hd, c.eps);
             try v.g.run(s, b.x, l.qkv, b.acc, n, 3 * hd, hd, .f32);
             try k.bias(s, b.acc, l.qkv_bias, null, b.wide, n, 3 * hd, .none);
-            try attention(k, &v.g, s, b.heads, b.wide, b.a, n, c.heads, hd / c.heads);
+            try attention(&v.at, s, b.wide, b.a, n, c.heads, hd / c.heads);
             try v.g.run(s, b.a, l.out, b.acc, n, hd, hd, .f32);
             try k.bias(s, b.acc, l.out_bias, b.h, b.h, n, hd, .none);
             try k.layerNorm(s, b.h, l.norm2, l.norm2_bias, b.x, n, hd, c.eps);

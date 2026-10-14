@@ -1,20 +1,36 @@
-//! LFM2's prompt attention against a float64 softmax of the same bf16 rows: one causal sequence, then packed trees.
+//! LFM2's attention against a float64 softmax of the same bf16 rows: causal, packed trees, and the tower's full tiles.
 const std = @import("std");
 const cuda = @import("cuda");
 const lfm2 = @import("lfm2");
 const check = @import("check.zig");
 
-const heads = 32;
-const kv_heads = 8;
-const dim = 64;
-const width = heads * dim; // a q or out row's values
-const kv_width = kv_heads * dim;
-const scale: f32 = 0.125; // 1 / sqrt(dim)
+/// A case's query heads, key/value heads and head dim; the softmax scale is 1 / sqrt(dim).
+const Shape = struct {
+    heads: usize,
+    kv_heads: usize,
+    dim: usize,
+
+    fn width(sh: Shape) usize {
+        return sh.heads * sh.dim;
+    }
+
+    fn kvWidth(sh: Shape) usize {
+        return sh.kv_heads * sh.dim;
+    }
+
+    fn scale(sh: Shape) f32 {
+        return @floatCast(1 / @sqrt(@as(f64, @floatFromInt(sh.dim))));
+    }
+};
+
+const text: Shape = .{ .heads = 32, .kv_heads = 8, .dim = 64 }; // the trunk's GQA
+const tower: Shape = .{ .heads = 16, .kv_heads = 16, .dim = 72 }; // SigLIP2's tiles
 const counts = [_]usize{ 1, 7, 33, 300, 4096 };
 const most = counts[counts.len - 1];
 const trunks = [_]usize{ 0, 1, 300, 3400 };
 const fans = [_]usize{ 1, 3, 64 };
 const longest = 60; // a branch's most rows
+const tiles = [_]usize{ 1, 7, 308, 1024 }; // a tile's patches: 308 a 22 x 14 thumbnail, 1024 a whole tile
 const cheap = 400; // rows over at most this many keys are all checked against the host
 
 fn bf16(x: f32) u16 {
@@ -43,6 +59,11 @@ fn values(a: std.mem.Allocator, rng: std.Random, n: usize) !Values {
 const Keys = struct {
     shared: usize = 0,
     own: usize = 0,
+
+    /// Every one of a sequence's `rows` keys, whichever the row.
+    fn all(rows: usize, row: usize) Keys {
+        return .{ .shared = rows, .own = row + 1 };
+    }
 
     fn count(ks: Keys, row: usize) usize {
         return ks.shared + row + 1 - ks.own;
@@ -88,15 +109,11 @@ fn finite(what: []const u8, out: []const u16) !void {
     try check.expect(bad == null, "{s}: every output finite (first not at element {?d})", .{ what, bad });
 }
 
-/// A case's q, k and v rows on the host and the device.
-const Rows = struct {
-    q: Values,
-    k: Values,
-    v: Values,
-    dq: u64,
-    dk: u64,
-    dv: u64,
-};
+/// A case's q, k and v rows on the host.
+const Rows = struct { q: Values, k: Values, v: Values };
+
+/// Their device copies.
+const Dev = struct { q: u64, k: u64, v: u64 };
 
 const Rig = struct {
     gpu: check.Gpu,
@@ -122,7 +139,7 @@ const Rig = struct {
     }
 
     /// Rows [first, first + n) of a [*, width] bf16 buffer, once the stream's work has landed.
-    fn back(r: *Rig, a: std.mem.Allocator, b: cuda.DeviceBuffer, first: usize, n: usize) ![]u16 {
+    fn back(r: *Rig, a: std.mem.Allocator, b: cuda.DeviceBuffer, width: usize, first: usize, n: usize) ![]u16 {
         const o = try a.alloc(u16, n * width);
         try r.s.synchronize();
         try b.download(first * width * 2, std.mem.sliceAsBytes(o));
@@ -134,29 +151,36 @@ const Rig = struct {
         r.bufs.clearRetainingCapacity();
     }
 
-    fn inputs(r: *Rig, a: std.mem.Allocator, rows: usize) !Rows {
-        const q = try values(a, r.rng, rows * width);
-        const k = try values(a, r.rng, rows * kv_width);
-        const v = try values(a, r.rng, rows * kv_width);
-        const dq = try r.from(std.mem.sliceAsBytes(q.bits));
-        const dk = try r.from(std.mem.sliceAsBytes(k.bits));
-        const dv = try r.from(std.mem.sliceAsBytes(v.bits));
-        return .{ .q = q, .k = k, .v = v, .dq = dq.ptr, .dk = dk.ptr, .dv = dv.ptr };
+    fn inputs(r: *Rig, a: std.mem.Allocator, sh: Shape, rows: usize) !Rows {
+        const q = try values(a, r.rng, rows * sh.width());
+        const k = try values(a, r.rng, rows * sh.kvWidth());
+        const v = try values(a, r.rng, rows * sh.kvWidth());
+        return .{ .q = q, .k = k, .v = v };
+    }
+
+    fn upload(r: *Rig, in: Rows) !Dev {
+        const q = try r.from(std.mem.sliceAsBytes(in.q.bits));
+        const k = try r.from(std.mem.sliceAsBytes(in.k.bits));
+        const v = try r.from(std.mem.sliceAsBytes(in.v.bits));
+        return .{ .q = q.ptr, .k = k.ptr, .v = v.ptr };
     }
 
     /// Row `row` of `got` against float64 over `keys`, bounded by one bf16 rounding of it and two of each probability.
-    fn compare(r: *Rig, t: *Tally, in: Rows, got: []const u16, row: usize, keys: Keys) void {
-        var want: [width]f64 = undefined;
-        var bound: [width]f64 = undefined;
+    fn compare(r: *Rig, t: *Tally, sh: Shape, in: Rows, got: []const u16, row: usize, keys: Keys) void {
+        var want_all: [@max(text.width(), tower.width())]f64 = undefined;
+        var bound_all: [want_all.len]f64 = undefined;
+        const want = want_all[0..sh.width()];
+        const bound = bound_all[0..sh.width()];
+        const d = sh.dim;
         const p = r.p[0..keys.count(row)];
-        for (0..heads) |h| {
-            const qh = in.q.vals[(row * heads + h) * dim ..][0..dim];
-            const kh = h / (heads / kv_heads);
+        for (0..sh.heads) |h| {
+            const qh = in.q.vals[(row * sh.heads + h) * d ..][0..d];
+            const kh = h / (sh.heads / sh.kv_heads);
             var top = -std.math.inf(f64);
             for (p, 0..) |*s, j| {
                 var dot: f64 = 0;
-                for (qh, in.k.vals[(keys.at(j) * kv_heads + kh) * dim ..][0..dim]) |x, y| dot += @as(f64, x) * y;
-                s.* = dot * scale;
+                for (qh, in.k.vals[(keys.at(j) * sh.kv_heads + kh) * d ..][0..d]) |x, y| dot += @as(f64, x) * y;
+                s.* = dot * sh.scale();
                 top = @max(top, s.*);
             }
             var sum: f64 = 0;
@@ -164,12 +188,12 @@ const Rig = struct {
                 s.* = @exp(s.* - top);
                 sum += s.*;
             }
-            const w = want[h * dim ..][0..dim];
-            const b = bound[h * dim ..][0..dim];
+            const w = want[h * d ..][0..d];
+            const b = bound[h * d ..][0..d];
             @memset(w, 0);
             @memset(b, 0);
             for (p, 0..) |s, j| {
-                for (w, b, in.v.vals[(keys.at(j) * kv_heads + kh) * dim ..][0..dim]) |*o, *m, x| {
+                for (w, b, in.v.vals[(keys.at(j) * sh.kv_heads + kh) * d ..][0..d]) |*o, *m, x| {
                     o.* += s * x;
                     m.* += s * @abs(x);
                 }
@@ -179,7 +203,7 @@ const Rig = struct {
                 m.* = (@abs(o.*) + 2 * m.* / sum) / 256;
             }
         }
-        t.row(got[row * width ..][0..width], &want, &bound);
+        t.row(got[row * sh.width() ..][0..sh.width()], want, bound);
     }
 };
 
@@ -189,18 +213,21 @@ fn causalCase(r: *Rig, t: *Tally) !void {
     defer arena.deinit();
     const a = arena.allocator();
     defer r.release();
-    const in = try r.inputs(a, most);
+    const sh = text;
+    const w = sh.width();
+    const in = try r.inputs(a, sh, most);
+    const d = try r.upload(in);
     var outs: [counts.len]cuda.DeviceBuffer = undefined;
     for (counts, &outs) |m, *o| {
-        o.* = try r.out(m * width * 2);
-        try r.attn.causal(r.s, in.dq, in.dk, in.dv, o.ptr, m, heads, kv_heads, dim, scale);
+        o.* = try r.out(m * w * 2);
+        try r.attn.causal(r.s, d.q, d.k, d.v, o.ptr, m, sh.heads, sh.kv_heads, sh.dim, sh.scale());
     }
-    const wide = try r.back(a, outs[counts.len - 1], 0, most);
+    const wide = try r.back(a, outs[counts.len - 1], w, 0, most);
     try finite("lfm2-attention causal", wide);
-    for (0..most) |row| if (sampled(row, .{}, 0, most)) r.compare(t, in, wide, row, .{});
+    for (0..most) |row| if (sampled(row, .{}, 0, most)) r.compare(t, sh, in, wide, row, .{});
     for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |m, o| {
-        const got = try r.back(a, o, 0, m);
-        try check.sameBytes("lfm2-attention causal prefix", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(wide[0 .. m * width]));
+        const got = try r.back(a, o, w, 0, m);
+        try check.sameBytes("lfm2-attention causal prefix", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(wide[0 .. m * w]));
     }
 }
 
@@ -210,44 +237,70 @@ fn treeCase(r: *Rig, t: *Tally, trunk: usize, fan: usize) !void {
     defer arena.deinit();
     const a = arena.allocator();
     defer r.release();
+    const sh = text;
+    const w = sh.width();
+    const kw = sh.kvWidth();
     const cu = try a.alloc(i32, fan + 1);
     cu[0] = 0;
     for (cu[1..], cu[0..fan]) |*c, prev| c.* = prev + r.rng.intRangeAtMost(i32, 1, longest);
     const rows = trunk + @as(usize, @intCast(cu[fan]));
-    const in = try r.inputs(a, rows);
+    const in = try r.inputs(a, sh, rows);
+    const d = try r.upload(in);
     const dcu = try r.from(std.mem.sliceAsBytes(cu));
-    const dout = try r.out(rows * width * 2);
-    try r.attn.tree(r.s, in.dq, in.dk, in.dv, dout.ptr, trunk, dcu.ptr, fan, rows, heads, kv_heads, dim, scale);
-    const got = try r.back(a, dout, 0, rows);
+    const dout = try r.out(rows * w * 2);
+    try r.attn.tree(r.s, d.q, d.k, d.v, dout.ptr, trunk, dcu.ptr, fan, rows, sh.heads, sh.kv_heads, sh.dim, sh.scale());
+    const got = try r.back(a, dout, w, 0, rows);
     var name: [64]u8 = undefined;
     const what = try std.fmt.bufPrint(&name, "lfm2-attention tree, trunk {d}, {d} branches", .{ trunk, fan });
     try finite(what, got);
-    for (0..trunk) |row| if (sampled(row, .{}, 0, trunk)) r.compare(t, in, got, row, .{});
+    for (0..trunk) |row| if (sampled(row, .{}, 0, trunk)) r.compare(t, sh, in, got, row, .{});
 
     const joint = trunk + longest;
-    const jq = try r.out(joint * width * 2);
-    const jk = try r.out(joint * kv_width * 2);
-    const jv = try r.out(joint * kv_width * 2);
-    const jout = try r.out(joint * width * 2);
-    try jq.copyFrom(0, in.dq, trunk * width * 2, r.s.handle);
-    try jk.copyFrom(0, in.dk, trunk * kv_width * 2, r.s.handle);
-    try jv.copyFrom(0, in.dv, trunk * kv_width * 2, r.s.handle);
+    const jq = try r.out(joint * w * 2);
+    const jk = try r.out(joint * kw * 2);
+    const jv = try r.out(joint * kw * 2);
+    const jout = try r.out(joint * w * 2);
+    try jq.copyFrom(0, d.q, trunk * w * 2, r.s.handle);
+    try jk.copyFrom(0, d.k, trunk * kw * 2, r.s.handle);
+    try jv.copyFrom(0, d.v, trunk * kw * 2, r.s.handle);
     for (cu[0..fan], cu[1..]) |c0, c1| {
         const first = trunk + @as(usize, @intCast(c0));
         const end = trunk + @as(usize, @intCast(c1));
         const keys: Keys = .{ .shared = trunk, .own = first };
-        for (first..end) |row| if (sampled(row, keys, first, end)) r.compare(t, in, got, row, keys);
+        for (first..end) |row| if (sampled(row, keys, first, end)) r.compare(t, sh, in, got, row, keys);
         const n = end - first;
-        try jq.copyFrom(trunk * width * 2, in.dq + first * width * 2, n * width * 2, r.s.handle);
-        try jk.copyFrom(trunk * kv_width * 2, in.dk + first * kv_width * 2, n * kv_width * 2, r.s.handle);
-        try jv.copyFrom(trunk * kv_width * 2, in.dv + first * kv_width * 2, n * kv_width * 2, r.s.handle);
-        try r.attn.causal(r.s, jq.ptr, jk.ptr, jv.ptr, jout.ptr, trunk + n, heads, kv_heads, dim, scale);
+        try jq.copyFrom(trunk * w * 2, d.q + first * w * 2, n * w * 2, r.s.handle);
+        try jk.copyFrom(trunk * kw * 2, d.k + first * kw * 2, n * kw * 2, r.s.handle);
+        try jv.copyFrom(trunk * kw * 2, d.v + first * kw * 2, n * kw * 2, r.s.handle);
+        try r.attn.causal(r.s, jq.ptr, jk.ptr, jv.ptr, jout.ptr, trunk + n, sh.heads, sh.kv_heads, sh.dim, sh.scale());
         const from = if (c0 == 0) 0 else trunk; // the trunk's rows once, beside the first branch
-        const alone = try r.back(a, jout, from, trunk + n - from);
-        const shared = (trunk - from) * width;
+        const alone = try r.back(a, jout, w, from, trunk + n - from);
+        const shared = (trunk - from) * w;
         try check.sameBytes(what, std.mem.sliceAsBytes(alone[0..shared]), std.mem.sliceAsBytes(got[0..shared]));
-        try check.sameBytes(what, std.mem.sliceAsBytes(alone[shared..]), std.mem.sliceAsBytes(got[first * width .. end * width]));
+        try check.sameBytes(what, std.mem.sliceAsBytes(alone[shared..]), std.mem.sliceAsBytes(got[first * w .. end * w]));
     }
+}
+
+/// One tile of the vision tower: every row over every key, its q, k and v heads side by side in qkv rows.
+fn fullCase(r: *Rig, t: *Tally, rows: usize) !void {
+    var arena: std.heap.ArenaAllocator = .init(r.gpu.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    defer r.release();
+    const sh = tower;
+    const w = sh.width();
+    const in = try r.inputs(a, sh, rows);
+    const qkv = try a.alloc(u16, 3 * rows * w);
+    for (0..rows) |i| for ([_]Values{ in.q, in.k, in.v }, 0..) |part, j| {
+        @memcpy(qkv[(3 * i + j) * w ..][0..w], part.bits[i * w ..][0..w]);
+    };
+    const dqkv = try r.from(std.mem.sliceAsBytes(qkv));
+    const dout = try r.out(rows * w * 2);
+    try r.attn.full(r.s, dqkv.ptr, dout.ptr, rows, sh.heads, sh.dim, sh.scale());
+    const got = try r.back(a, dout, w, 0, rows);
+    var name: [64]u8 = undefined;
+    try finite(try std.fmt.bufPrint(&name, "lfm2-attention full, {d} rows", .{rows}), got);
+    for (0..rows) |row| if (sampled(row, .all(rows, row), 0, rows)) r.compare(t, sh, in, got, row, .all(rows, row));
 }
 
 pub fn run(gpu: check.Gpu) !void {
@@ -255,7 +308,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer s.deinit();
     var attn = try lfm2.attention.Attention.load(gpu.d);
     defer attn.unload();
-    const refused = if (attn.causal(s, 0, 0, 0, 0, 1, heads, kv_heads, 128, scale)) |_| false else |e| e == error.UnsupportedShape;
+    const refused = if (attn.causal(s, 0, 0, 0, 0, 1, text.heads, text.kv_heads, 128, text.scale())) |_| false else |e| e == error.UnsupportedShape;
     try check.expect(refused, "lfm2-attention: head dim 128 is refused", .{});
 
     var prng = std.Random.DefaultPrng.init(64);
@@ -272,6 +325,10 @@ pub fn run(gpu: check.Gpu) !void {
     var tree: Tally = .{};
     for (trunks) |trunk| for (fans) |fan| try treeCase(&r, &tree, trunk, fan);
     try tree.expect("lfm2-attention tree");
-    const said = "lfm2-attention: causal {d} rows (worst {d:.3}, max abs {e:.3}), trees {d} rows (worst {d:.3}, max abs {e:.3})";
-    check.pass(said ++ " within bound; shorter launches, trunks and branches bit-equal to causal", .{ causal.rows, causal.worst, causal.err_most, tree.rows, tree.worst, tree.err_most });
+    var full: Tally = .{};
+    for (tiles) |rows| try fullCase(&r, &full, rows);
+    try full.expect("lfm2-attention full");
+    const said = "lfm2-attention: causal {d} rows (worst {d:.3}, max abs {e:.3}), trees {d} rows (worst {d:.3}, max abs {e:.3}), " ++
+        "full {d} rows (worst {d:.3}, max abs {e:.3})";
+    check.pass(said ++ " within bound; shorter launches, trunks and branches bit-equal to causal", .{ causal.rows, causal.worst, causal.err_most, tree.rows, tree.worst, tree.err_most, full.rows, full.worst, full.err_most });
 }

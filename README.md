@@ -1,36 +1,81 @@
-# d1-3B on TensorFold — DGX Spark recipe
+# d1-3B on TensorFold
 
-Serve [Liquid AI's d1-3B](https://huggingface.co/LiquidAI/d1-3B) on one NVIDIA DGX Spark using
-[TensorFold's Python 0.6 engine](https://github.com/ashhart/TensorFold/tree/ed78d6fc204d89d90b045bf033d6551e7714f3a1) (the pinned commit this recipe builds), not the separate native 1.x engine.
-This repository carries the audited LFM2 CUDA implementation, digest-pinned container build,
-launchers, checkpoint checksums and retained performance evidence.
+**Serve Liquid AI's d1-3B decision model on one DGX Spark, with the evidence to check it.**
 
-**Native checkpoint BF16 only.** The current engine replaces the earlier packed/quantized implementation.
-It includes exact-shape CUDA graphs and the persistent-HTTP `TCP_NODELAY` fix. FP8 and INT4 are refused;
-their [historical results](results/report.md) do not describe this engine.
+[d1-3B](https://huggingface.co/LiquidAI/d1-3B) answers questions about a state (text, a picture, or both)
+with probabilities, not generated text. This recipe serves it through
+[TensorFold's Python 0.6 engine](https://github.com/ashhart/TensorFold/tree/ed78d6fc204d89d90b045bf033d6551e7714f3a1)
+at a pinned commit plus three source patches, implementing llama-server's System One API. A decision is one forward
+pass: every response has **zero output tokens**.
 
-The retained warm comparison is **INCONCLUSIVE overall**, not an unqualified performance certification.
-Three-question, long-state and image gates passed; one-question reference spread and packed-throughput
-uncertainty remain open. See [audited performance evidence](results/audited-bf16/summary.json).
+| I want to... | Use | What you get |
+|---|---|---|
+| Serve d1-3B | `./start.sh` | `POST /v1/systemone` and `/v1/decisions` on `127.0.0.1:8080` |
+| Measure a running server | `scripts/bench.sh run` | Latency, throughput and parity against the model's own code, saved under `results/` |
+| Compare with llama.cpp | `scripts/llamacpp.sh start` | llama-server at a pinned commit, serving Liquid AI's GGUF files on `127.0.0.1:8081` |
 
-## Quick start
+Everything runs on your machine. The weights are downloaded from Hugging Face at a pinned revision and checked
+against [checksums](checksums/d1-3B.sha256); they are never part of this repository.
+**Native BF16 only, qualified on one GB10.**
 
-Requirements: Linux, Docker with NVIDIA Container Toolkit, a CUDA-13-compatible driver, Bash, curl and
-GNU coreutils. Qualified hardware coverage is one GB10 / DGX Spark, arm64, sm_121. Other GPUs and
-multi-GPU operation are not qualified. Allow roughly 35 GB for the image and checkpoint.
+## Headline results
+
+Warm loopback HTTP on one GB10 at 4096 context. Three fresh servers ran one after another: llama.cpp BF16 (A),
+the audited TensorFold implementation integrated into this recipe (B), and the same llama.cpp BF16 again (A2) as a
+control. These timings precede packaging; the baked image passed integration checks, not a new performance
+comparison. Means:
+
+| Workload | llama.cpp A | TensorFold B | llama.cpp A2 | Verdict |
+|---|---:|---:|---:|---|
+| One question, 39 input tokens | 27.90 ms | 24.09 ms | 28.19 ms | INCONCLUSIVE |
+| Three questions on one state | 118.61 ms | 27.36 ms | 119.36 ms | PASS |
+| One question, 3446 input tokens | 443.93 ms | 277.26 ms | 445.06 ms | PASS |
+| One question about a 384×288 picture | 101.04 ms | 47.02 ms | 100.22 ms | PASS |
+| 64-client burst | 37.15 req/s | 40.70 req/s | 37.26 req/s | INCONCLUSIVE |
+
+The overall verdict is **INCONCLUSIVE**, not a performance certification: the two one-question control runs
+spread too far apart to call, and the burst's adverse bound reached 6.40%, past its tolerance. A better mean
+does not turn either gate into a pass. The summary also flags changed reported input-token exposure for the
+three-question state: 116 for TensorFold versus 154 for llama.cpp. Each run answered 2320 measured requests
+(2520 decisions) after 340 warmup requests, all complete.
+
+Several questions on one state are where the recipe gains most: when the questions fit in one forward, the state
+is read once and each question branches off it, which is why TensorFold reports 116 input tokens for the
+three-question request where llama.cpp reports 154.
+
+The packaged image's integration checks recorded repeated/concurrent response agreement and zero output tokens.
+The retained timing derivatives omit answer payloads; these checks do not establish held-out accuracy.
+
+System memory rose by 8.94 GiB once loaded and by 16.69 GiB after the text, image and 64-client workloads.
+These are snapshots on shared unified memory, not peaks.
+
+Evidence: [summary](results/audited-bf16/summary.json), [timings](results/audited-bf16/timings.json),
+[memory](results/audited-bf16/memory-summary.json), [provenance](results/audited-bf16/provenance.json).
+The [historical results](results/report.md) describe an earlier packed/quantized engine and do not apply here.
+
+## Requirements
+
+- One NVIDIA DGX Spark (GB10, arm64, compute capability 12.1). Other GPUs and multi-GPU setups are not qualified.
+- Linux, Docker with the NVIDIA Container Toolkit, and a CUDA-13-compatible driver.
+- Bash, curl, GNU coreutils and Git; Python 3 for the optional host-side unit tests.
+- 56 GiB of available memory at launch. The launchers refuse to load below that (`MIN_FREE_GIB`).
+- Access to Hugging Face, NVIDIA NGC and GitHub for the first build and download. Set `HF_TOKEN` if your
+  Hugging Face account needs it.
+
+## Quickstart
 
 ```bash
 git clone https://github.com/plotarmordev/d1-tensorfold.git
 cd d1-tensorfold
-./scripts/prepare.sh
 ./start.sh
 ```
 
-`prepare.sh` builds the image and verifies the pinned checkpoint.
-The build applies three source patches and verifies all eleven changed runtime files against
-[checksums/tensorfold-audited.sha256](checksums/tensorfold-audited.sha256). It does not depend on a development
-source mount. First startup compiles CUDA/Triton kernels into `data/cache`; later launches reuse them.
-Compilation, loading and graph promotion are excluded from the warm measurements below.
+`start.sh` runs `scripts/prepare.sh` first. That builds the image, applies the three patches and verifies all
+eleven changed runtime files against [checksums/tensorfold-audited.sha256](checksums/tensorfold-audited.sha256),
+then downloads d1-3B and verifies every file. The first start compiles CUDA and Triton kernels into
+`data/cache`; later starts reuse them.
+
+Ask a question:
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/systemone \
@@ -39,150 +84,103 @@ curl -s http://127.0.0.1:8080/v1/systemone \
        "questions":{"refund":{"type":"noul","instructions":"Is the customer asking for a refund?"}}}'
 ```
 
-A decision is a forward pass, not generated text: responses have **zero output tokens**.
-`questions` is an object keyed by question ID, not a list. Chat/completion generation is refused.
+`questions` is an object keyed by question ID, not a list. Each question has one of three types:
 
-| Type | Criteria | Result |
+| Type | Criteria | Answer |
 |---|---|---|
 | `noul` | Optional true/false descriptions | Probability of yes |
 | `choice` | Object mapping option names to descriptions | Chosen name, confidence, probabilities |
-| `score` | List of 2–10 ordered descriptions | Expected numeric level, confidence, probabilities, legend |
+| `score` | List of 2 to 10 ordered descriptions | Expected level, confidence, probabilities, legend |
 
-Confidence follows the model's native best-option probability, not a substitute entropy formula.
-For images, supply `images: ["data:image/jpeg;base64,..."]` with textual `state` or `state: null`.
-The shared image parser defaults to four images; remote URLs and video are unsupported. The engine uses
-the checkpoint's SigLIP2 tower and projector. The retained performance image is one 384×288 picture,
-not a qualification of arbitrary images or multi-image quality.
+For pictures, send `images: ["data:image/jpeg;base64,..."]` with a text `state` or `state: null`. Up to four
+pictures by default; remote URLs and video are not supported. `/v1/decisions` is a separate schema, not an alias.
+`/health` and `/v1/models` are available; chat and completions are refused. `./stop.sh` stops the server.
 
-`/v1/decisions` is a separate schema, not a System One alias. Its probability-mass contract uses the full
-vocabulary head; System One uses the sparse option head. `/health` and `/v1/models` are available.
+### Settings
 
-## Settings and memory
-
-Copy `scripts/local.sh.example` to git-ignored `scripts/local.sh` for local settings.
-Caller/environment values override that file, which overrides [defaults](scripts/config.sh).
-Models, caches, downloaded pictures and local settings stay outside git.
+Copy `scripts/local.sh.example` to `scripts/local.sh` (git-ignored). Environment variables override that file,
+which overrides the [defaults](scripts/config.sh). Precision, ports, context, token budget, graph mode and the
+memory floor are checked before a running server is replaced; not every setting is prevalidated.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `PRECISION` | `bf16` | Native BF16 only; other values fail before replacing a server |
-| `CONTEXT` | `32768` | Serving context, 1–32768; retained performance measurements used 4096 |
+| `CONTEXT` | `32768` | Serving context, 1 to 32768. The measurements used 4096 |
 | `HOST`, `PORT` | `127.0.0.1`, `8080` | Endpoint binding |
-| `DATA_DIR` | `./data` | Model downloads and caches |
-| `TOKEN_BUDGET` | `65536` | Trunk-plus-branch token limit; effective limit is capped by admitted context |
-| `CUDA_GRAPHS` | `1` | Set `0` for eager execution |
-| `MIN_FREE_GIB` | `56` | Required host MemAvailable before launch, not a runtime cap |
+| `DATA_DIR` | `./data` | Model downloads and kernel caches |
+| `TOKEN_BUDGET` | `65536` | Tokens per forward, 4096 to 65536; the effective budget is capped by `CONTEXT`, and larger question sets are split across forwards |
+| `CUDA_GRAPHS` | `1` | `0` runs eagerly |
+| `MIN_FREE_GIB` | `56` | Available memory required before launch, not a runtime cap |
+| `PRECISION` | `bf16` | Native BF16 only; anything else is refused |
 
-```bash
-CONTEXT=4096 ./start.sh       # context used in the retained performance comparison
-./stop.sh                    # stops this recipe's TensorFold and historical baseline containers
-```
+## Reproduce
 
-GB10 has unified CPU/GPU memory. The audited candidate's measured system-memory increase was **8.94 GiB
-loaded** and **16.69 GiB after text, image and 64-client workloads**, at 4096 context. These are approximate
-shared-host snapshots, not peaks; GPU allocation and CPU RSS are components, not additional memory to sum.
-Full-32K-context peaks and minimum RAM remain unqualified. The graph cache's 2 GiB workspace estimate is
-not a process-memory ceiling. The conservative 56 GiB startup floor leaves room for temporary allocations
-and other processes; do not lower it without measuring your own workload.
-
-A prior CUDA context creation failed before weight loading despite substantial MemAvailable. Admission
-cannot guarantee allocation succeeds. Do not reset GPUs or stop unrelated services as automatic recovery.
-Reserve the GPU operationally and avoid overlapping model launches. Containers do not auto-restart.
-
-`HOST=0.0.0.0` exposes an unauthenticated endpoint. Keep loopback binding or provide access control.
-
-## What is optimized
-
-- Native BF16 checkpoint tensors: no on-load quantization, casts or alternate projection copies.
-- Sparse System One output head: only required option-token rows, not all 128000 vocabulary entries.
-- Shared state trunk and question branches within one request. Tree attention and branch-local convolution
-  preserve question isolation. A lock serializes GPU requests; there is no cross-request batcher or answer cache.
-- Fused residual/RMS normalization, SiLU multiplication, short convolution and query/key normalization with RoPE.
-- Exact-shape CUDA graphs keyed by trunk length and all branch lengths, without padding or alternate math.
-  Replay replaces every input embedding, including vision inputs, and copies outputs before reuse.
-- Bounded graph roster: at most eight resident graphs and a 2 GiB estimated workspace budget, with eviction.
-  First sightings are eager; promotion performs two warmup forwards, capture and replay. Rare shapes stay eager.
-- HTTP `TCP_NODELAY`: avoids delayed-ACK stalls caused by separate header/body writes on reused connections.
-  Graphs alone did not resolve the observed roughly 41 ms transport penalty.
-
-The architecture has 30 language layers: 22 short-convolution and eight attention layers, hidden width 2048,
-32 query / eight KV heads, head dimension 64 and a tied 128000-token embedding/head.
-
-## Retained performance and fidelity evidence
-
-The final frozen A/B/A2 comparison used llama.cpp BF16 / audited TensorFold / identical llama.cpp BF16,
-sequential fresh servers, a shared GB10 host and 4096 context. Another inference service remained resident;
-its external traffic was not controlled. Means are descriptive; verdicts use the original observed-envelope gates.
-
-| Workload | Reference A | TensorFold B | Reference A2 | Unit | Gate |
-|---|---:|---:|---:|---|---|
-| One question | 27.90 | 24.09 | 28.19 | ms | INCONCLUSIVE |
-| Three questions | 118.61 | 27.36 | 119.36 | ms | PASS |
-| Long state | 443.93 | 277.26 | 445.06 | ms | PASS |
-| Image | 101.04 | 47.02 | 100.22 | ms | PASS |
-| 64-client burst | 37.15 | 40.70 | 37.26 | requests/s | INCONCLUSIVE |
-
-One-question reference spread was 34.15%, above the predeclared 30% guard. The packed adverse envelope
-reached 6.40%, above 5% tolerance. Better means do not turn either gate into PASS.
-Each arm had 2320 measured requests / 2520 decisions, plus 340 warmup requests; all 6960 measured requests
-completed without request errors. Three-question usage differs: TensorFold counts the shared trunk once
-(116 tokens), while the reference repeats it per question (154). Raw counters and the collector warning remain.
-
-Cold/new-shape costs are separate: first one-question request 3.122 s, its promoting call 94.19 ms,
-and long-state promotion 886.02 ms. No cold-readiness claim follows from warm timings.
-
-The candidate's 2320 measured responses matched its earlier audited BF16 answers and usage exactly.
-A separate real-checkpoint check replayed 68/68 requests exactly equal to eager answers, including images
-and multiple questions; a 32-geometry pressure run exercised 30 evictions. A fixed independent CPU-FP32
-reference agreed on 70/70 selected outcomes (maximum probability difference 0.012477). This is numerical
-fidelity, not held-out accuracy. Earlier focused validation passed 78 host/CUDA/checkpoint tests; shared
-host validation passed 167 with two skipped. These overlap and are not a full-suite-green claim.
-
-The collector was an unreleased TheGrill extension, not released v0.6 functionality. Its source
-identity was unrecorded; its binary, plan and runtime source hashes are retained in
-[provenance.json](results/audited-bf16/provenance.json). Raw payloads and original audit artifacts stay outside git;
-neutralized timing derivatives and their source hashes are retained here. Failed eager and graph-only runs,
-and an aborted pre-weight CUDA-context launch, remain explicitly represented in the provenance record.
-No new llama.cpp comparison is required to run this recipe or its direct intelligence pilot.
-
-## Run checks on your own host
-
-The baked-image [integration smoke](results/audited-bf16/integration.json) completed 20 qualifier requests,
-five graph captures and 15 replays with no failures. The actual launcher also passed persistent-connection
-and 16-client checks, zero output tokens, oversized/generation refusal, and fail-before-replacement checks.
-Four recipe integrity tests passed. No hosted CI workflows are configured; this is local verification.
+The recipe's own checks, without a GPU:
 
 ```bash
 python3 -m unittest discover -s tests -v
-./scripts/prepare.sh
-# Run the live qualifier in the built image with the checkpoint and a writable output directory mounted:
-# python3 bench/qualify_recipe.py --model /model --context 4096 --output /output/qualification.json --label bf16
-./scripts/bench.sh run http://127.0.0.1:8080 trial-native-bf16
 ```
 
-Use fresh result labels: existing evidence is never overwritten. The benchmark wrapper compares against the
-shipped historical Transformers reference; agreement is not task accuracy. The live qualifier checks repeated
-and concurrent answers, zero generated tokens, images and actual graph-cache activity.
+Measure this recipe, then the llama.cpp baseline. Run the servers one at a time, as the measurements did:
 
-[Historical results](results/report.md) and their raw JSON remain unchanged, except their report is explicitly
-labeled pre-audit. `python3 bench/report.py results` regenerates that historical table, not the table above.
-The historical llama.cpp helper remains available for reproduction (`LLAMACPP_PORT`, `CUDA_ARCH`); it is not
-part of the current direct D1-versus-Jev pilot. Old FP8/INT4 modes require the historical recipe commit,
-not `PRECISION=fp8` or `PRECISION=int4` on this branch.
+```bash
+CONTEXT=4096 ./start.sh
+./scripts/bench.sh run http://127.0.0.1:8080 my-tensorfold-bf16
+./stop.sh
 
-## Pins and licensing
+./scripts/llamacpp.sh start BF16          # or Q8_0, Q4_K_M
+./scripts/bench.sh run http://127.0.0.1:8081 my-llamacpp-BF16
+./scripts/llamacpp.sh stop
+```
 
-- Model: `LiquidAI/d1-3B@051bcc464b01b9f92942b364d9586b0ef5912432`.
-- TensorFold: `ed78d6fc204d89d90b045bf033d6551e7714f3a1` plus the three audited patches.
-- Patched-package SHA256 manifest: `69e14f6cbb17bc99bd377d2178cab6a74e2b1a062b439b7a567ffb19e87f1bed`.
-- NGC PyTorch 26.07 base: immutable manifest digest in `scripts/config.sh`.
-- Historical GGUF pin: `bb1e436ea78eb96a3f1acb6da865f70c2fbeb563`; llama.cpp: `4413a192410fad1f054e9216114087a3e01527a0`.
+Each run writes `results/LABEL.json` and `results/parity-LABEL.json` and refuses to overwrite existing results,
+so use a fresh label. Parity compares against the shipped Transformers reference
+([results/reference.json](results/reference.json)); agreement is not task accuracy.
+`./scripts/bench.sh reference` regenerates the reference with the model's own code on the GPU and writes
+`results/reference-local.json` by default; `./scripts/bench.sh report` prints the historical tables to stdout.
+Neither overwrites the shipped [reference](results/reference.json) or [report](results/report.md).
 
-The image hash covers the Dockerfile, source URL/commit, base image, explicit extra dependencies, patches
-and runtime source manifest. It identifies build inputs, not byte-for-byte hermetic Docker reproducibility;
-transitive build/download tooling is not completely locked. No registry image is published.
+The live qualifier checks repeated/concurrent answer agreement and zero output tokens, exercises pictures, and
+records CUDA graph statistics. It loads its own engine and server, so stop the serving containers first. It is an
+in-container command: run it in the built image with GPU access, the repository mounted at `/recipe` as the working
+directory, the checkpoint at `/model`, a writable `/output` and a writable cache at `/cache`:
 
-Recipe and authored patches: [Apache-2.0](LICENSE). TensorFold Python 0.6: Apache-2.0. Historical llama.cpp: MIT.
-The model is separately licensed under [Liquid AI's LFM Open License v1.0](https://huggingface.co/LiquidAI/d1-3B/blob/051bcc464b01b9f92942b364d9586b0ef5912432/LICENSE).
-NGC's container has NVIDIA's own terms. These licenses are not replaced by the recipe license.
-Weights and downloaded benchmark images are not redistributed. See [NOTICE](NOTICE).
+```bash
+python3 bench/qualify_recipe.py --model /model --context 4096 --output /output/qualification.json --label bf16
+```
+
+The image's [integration run](results/audited-bf16/integration.json) recorded 20 qualifier requests and no
+failures; its graph statistics recorded five captures and 15 replays.
+
+## Limitations
+
+- **The overall performance verdict is INCONCLUSIVE.** Three of five workloads passed; the one-question and
+  burst gates did not.
+- **Warm numbers only.** Cold and new-shape costs are separate: the first one-question request took 3.122 s,
+  the call that promoted its graph 94.19 ms, and the long-state promotion 886.02 ms.
+- **Shared host.** Another inference service stayed resident during the measurements, and its traffic was not
+  controlled.
+- **Memory is not fully qualified.** Snapshots were taken at 4096 context; peaks at the full 32768 context and the
+  minimum RAM are unknown. A launch can still fail to allocate: one earlier attempt failed to create its CUDA
+  context before loading weights. Containers do not restart on their own.
+- **BF16 only.** FP8 and INT4 are refused. Their historical numbers need the historical recipe commit `864a9fe`.
+- **The A/B/A2 collector is unreleased.** The collector binary and plan hashes are recorded in
+  [provenance.json](results/audited-bf16/provenance.json); the collector source revision was not recorded.
+- **Not hermetic.** The image hash covers the declared build inputs, but transitive build tooling is not locked.
+  No registry image is published.
+- **No hosted CI.** All verification is local.
+- `HOST=0.0.0.0` exposes an unauthenticated endpoint. Keep loopback binding or add access control.
+
+## License and credits
+
+The recipe and its patches are licensed under [Apache 2.0](LICENSE). It builds on:
+
+- [TensorFold](https://github.com/ashhart/TensorFold) `ed78d6fc204d89d90b045bf033d6551e7714f3a1`, Apache 2.0.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) `4413a192410fad1f054e9216114087a3e01527a0`, MIT, for the baseline.
+- [d1-3B](https://huggingface.co/LiquidAI/d1-3B) by Liquid AI, revision `051bcc464b01b9f92942b364d9586b0ef5912432`
+  (GGUF `bb1e436ea78eb96a3f1acb6da865f70c2fbeb563`), under the
+  [LFM Open License v1.0](https://huggingface.co/LiquidAI/d1-3B/blob/051bcc464b01b9f92942b364d9586b0ef5912432/LICENSE).
+- NVIDIA's NGC PyTorch 26.07 container, under NVIDIA's terms; its digest is pinned in `scripts/config.sh`.
+- The benchmark picture, COCO val2017 image 39769, fetched at bench time under its owner's license.
+
+Weights and benchmark pictures are not redistributed. Their licenses are not replaced by the recipe's.
+See [NOTICE](NOTICE).

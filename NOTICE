@@ -16,3 +16,6 @@ It builds on these upstream projects; their packages and model files are downloa
 - The int4 range search follows the idea of llama.cpp's k-quants (make_qkx2_quants), reimplemented.
 - The bench picture is COCO val2017 image 39769 (https://cocodataset.org), fetched at bench time and not
   redistributed; it keeps its owner's license.
+- Fast Decisions (https://huggingface.co/datasets/fastino/fast-decisions), Apache License 2.0, Fastino. Its files
+  are downloaded at the revision pinned in checksums/fast-decisions.sha256. results/calibration/answers.jsonl
+  repeats the dataset's row ids, task and label names and gold labels, but none of its texts.

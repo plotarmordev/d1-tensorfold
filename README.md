@@ -53,6 +53,52 @@ Evidence: [summary](results/audited-bf16/summary.json) · [timings](results/audi
 
 </details>
 
+## Calibration (our run)
+
+d1-3B on this recipe was run against the Fast Decisions dev split, pinned to
+[`fastino/fast-decisions@35afb79a`](https://huggingface.co/datasets/fastino/fast-decisions/tree/35afb79a0f611a1db44380e855ac2a821b0a4da1).
+The run covers 2600 single-label questions in 1700 rows.
+
+Each question is sent as a `choice` over the dataset's own labels, verbatim and in their original order, with the
+instruction `Choose the {task} label.` Confidence is the probability of the chosen option.
+
+| Accuracy | ECE, 10 equal-width bins |
+|---:|---:|
+| 61.7% (95% CI 59.7–63.7) | 12.3% (95% CI 10.6–14.2) |
+
+**d1-3B is over-confident in every confidence band.** In all nine populated bands, accuracy is 5.1 to 18.9 points
+below the mean confidence.
+
+![Reliability of d1-3B on the Fast Decisions dev split](results/calibration/reliability.svg)
+
+Evidence: [summary](results/calibration/summary.json) · [manifest](results/calibration/manifest.json) ·
+[every answer](results/calibration/answers.jsonl) · [gap per band](results/calibration/accuracy-minus-confidence.svg)
+
+Scripts: [`bench/calibration.py`](bench/calibration.py) and [`bench/calibration_chart.py`](bench/calibration_chart.py).
+To reproduce, write to a fresh directory:
+
+```bash
+python3 bench/calibration.py fetch && ./start.sh
+python3 bench/calibration.py run --out results/calibration-mine && ./stop.sh
+python3 bench/calibration.py score --out results/calibration-mine
+python3 bench/calibration_chart.py --summary results/calibration-mine/summary.json
+```
+
+<details>
+<summary>What these numbers don't show</summary>
+
+- **Not comparable** with vendor figures for other models, prompts, data or binning.
+- **Dev split, calibration only:** the dataset card asks that scores on these files not be reported as its
+  benchmark. The prompt mapping is ours, so 61.7% is not the model card's 69.3 on this split.
+- **Single-label heads only:** the 300 multi-label heads were left out.
+- **One run:**
+  - one GB10, BF16 at 32768 context, recipe `38f81ee`, image `359f54dea5af`;
+  - checkpoint checked against the pinned hashes;
+  - intervals from 1000 bootstrap resamples of rows, seed 0.
+- **Small bands:** the 10–20% band holds 2 questions and the 20–30% band 36.
+
+</details>
+
 ## Quickstart
 
 On a DGX Spark with Docker, the NVIDIA Container Toolkit and 56 GiB free ([requirements](#requirements-and-limits)):
@@ -138,6 +184,8 @@ Built on [TensorFold](https://github.com/ashhart/TensorFold/tree/ed78d6fc204d89d
 and, for the baseline, [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). [d1-3B](https://huggingface.co/LiquidAI/d1-3B)
 is by Liquid AI under the [LFM Open License v1.0](https://huggingface.co/LiquidAI/d1-3B/blob/051bcc464b01b9f92942b364d9586b0ef5912432/LICENSE);
 the NGC container is under NVIDIA's terms; the bench picture is COCO val2017 image 39769. Weights and pictures are
-downloaded, never redistributed.
+downloaded, never redistributed. [Fast Decisions](https://huggingface.co/datasets/fastino/fast-decisions) is by
+Fastino under Apache 2.0. Its texts are downloaded; the calibration answers repeat only its row ids, label names and
+gold labels.
 
 [Changelog](CHANGELOG.md) · [Evidence](results/audited-bf16) · [Pins](scripts/config.sh) · [Notice](NOTICE) · [Apache 2.0 license](LICENSE)

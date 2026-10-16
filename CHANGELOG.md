@@ -1,5 +1,27 @@
 # Changelog
 
+## Calibration
+
+- First calibration run (recipe `38f81ee`, BF16 at 32768 context, one GB10), in `results/calibration/` and the
+  README's "Calibration (our run)" section.
+  - On 2600 dev-split questions: accuracy 61.7% (95% CI 59.7–63.7), ECE 12.3% (95% CI 10.6–14.2).
+  - Over-confident in every populated band.
+  - The run's manifest recorded the checkpoint's absolute host path. That one field was rewritten to
+    `data/models/d1-3B` before committing, and the collector now records a path inside the checkout that way.
+  - The gap chart's legend no longer overlaps deep bars.
+- Added `bench/calibration.py`: fetches the Fast Decisions dev split (`fastino/fast-decisions@35afb79a`, Apache 2.0)
+  into the git-ignored cache and checks it against `checksums/fast-decisions.sha256`, sends every single-label head
+  to `/v1/systemone` as a `choice` over its labels, and scores accuracy and top-label ECE (10 equal-width bins,
+  weighted by count) with seeded 1000-sample row-bootstrap 95% intervals.
+- Each run records what served it. Before the first question, `docker inspect` of the recipe container gives the
+  image id, the command and context, and the precision, token budget, CUDA-graph and TF32 settings. The mounted
+  checkpoint is checked against `checksums/d1-3B.sha256`, and its `hf download` revision is recorded.
+  - This only applies to a loopback URL that the container publishes, through a local Docker daemon.
+  - A run stops if any of this is missing, or if the container changes during the run.
+  - Any other server needs `--provenance FILE`, which records operator-supplied evidence.
+- Added `bench/calibration_chart.py`, a standard-library SVG reliability diagram and accuracy-minus-confidence chart,
+  and tests for the binning, ECE and bootstrap and for a full run against a stub server.
+
 ## Audited native-BF16 cutover
 
 - Replaced the earlier packed/quantized family with the measured native-checkpoint BF16 implementation:

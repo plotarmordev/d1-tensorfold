@@ -228,6 +228,10 @@ class Run(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "manifest"):
             C.score(self.out)
 
+    def test_a_checkpoint_inside_the_checkout_is_named_relative_to_it(self):
+        with mock.patch.object(C, "ROOT", Path(self.tmp.name)):
+            self.assertEqual(C.checkpoint(self.model, C.pins(C.MODEL_PINS))["dir"], "model")
+
     def test_missing_serving_evidence_stops_the_run_before_any_question(self):
         def unavailable(*args):
             raise subprocess.CalledProcessError(1, "docker", stderr="Error: No such container: d1-tensorfold\n")

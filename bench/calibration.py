@@ -199,7 +199,9 @@ def checkpoint(directory: Path, pinned: dict[str, str]) -> dict:
         revisions.add(meta.read_text().split("\n", 1)[0] if meta.exists() else None)
     if len(revisions) != 1 or None in revisions:
         raise SystemExit(f"{directory}: its files do not record one `hf download` revision")
-    return {"dir": str(directory), "revision": revisions.pop(), "files_sha256": pinned}
+    # relative inside the checkout, so a committed manifest names no host directory
+    shown = directory.relative_to(ROOT) if directory.is_relative_to(ROOT) else directory
+    return {"dir": str(shown), "revision": revisions.pop(), "files_sha256": pinned}
 
 
 def serving(url: str, name: str, provenance: Path | None) -> dict:

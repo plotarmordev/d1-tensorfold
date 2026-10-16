@@ -134,7 +134,7 @@ def gaps(s: dict) -> str:
              text(left + plot_w / 2, y(-limit) + 54, "Confidence band of the chosen option (%)", 13, "middle"),
              text(left - 44, y(0), "Accuracy − confidence (points)", 13, "middle", vertical=True),
              text(left + plot_w - 4, y(limit) + 14, "above 0: under-confident", 11, "end", BLUE),
-             text(left + plot_w - 4, y(-limit) - 6, "below 0: over-confident", 11, "end", ORANGE)]
+             text(left + plot_w - 4, y(limit) + 30, "below 0: over-confident", 11, "end", ORANGE)]
     return document(width, height, body)
 
 

@@ -18,26 +18,39 @@ Everything runs on your machine. The weights are downloaded from Hugging Face at
 against [checksums](checksums/d1-3B.sha256); they are never part of this repository.
 **Native BF16 only, qualified on one GB10.**
 
-## Headline results
+## Stock llama.cpp vs this build
 
-Warm loopback HTTP on one GB10 at 4096 context. Three fresh servers ran one after another: llama.cpp BF16 (A),
-the audited TensorFold implementation integrated into this recipe (B), and the same llama.cpp BF16 again (A2) as a
-control. These timings precede packaging; the baked image passed integration checks, not a new performance
-comparison. Means:
+Same GB10, warm loopback HTTP, 4096 context. Stock is llama.cpp serving the model in BF16; ours is the audited
+TensorFold implementation integrated into this recipe, also BF16. Three fresh servers ran one after another:
+stock (A), ours (B), then stock again (A2) as a control. Values are means; the ratio compares ours with each
+stock run (stock latency over ours; for the burst, ours over stock).
 
-| Workload | llama.cpp A | TensorFold B | llama.cpp A2 | Verdict |
-|---|---:|---:|---:|---|
-| One question, 39 input tokens | 27.90 ms | 24.09 ms | 28.19 ms | INCONCLUSIVE |
-| Three questions on one state | 118.61 ms | 27.36 ms | 119.36 ms | PASS |
-| One question, 3446 input tokens | 443.93 ms | 277.26 ms | 445.06 ms | PASS |
-| One question about a 384×288 picture | 101.04 ms | 47.02 ms | 100.22 ms | PASS |
-| 64-client burst | 37.15 req/s | 40.70 req/s | 37.26 req/s | INCONCLUSIVE |
+| Workload | Stock A | Stock A2 | Ours | Ours vs stock | Verdict | Source |
+|---|---:|---:|---:|---:|---|---|
+| One question, 39 input tokens | 27.90 ms | 28.19 ms | 24.09 ms | 1.16–1.17× faster | INCONCLUSIVE | [summary](results/audited-bf16/summary.json) |
+| Three questions on one state | 118.61 ms | 119.36 ms | 27.36 ms | 4.34–4.36× faster | PASS | [summary](results/audited-bf16/summary.json) |
+| One question, 3446 input tokens | 443.93 ms | 445.06 ms | 277.26 ms | 1.60–1.61× faster | PASS | [summary](results/audited-bf16/summary.json) |
+| One question about a 384×288 picture | 101.04 ms | 100.22 ms | 47.02 ms | 2.13–2.15× faster | PASS | [summary](results/audited-bf16/summary.json) |
+| 64-client burst | 37.15 req/s | 37.26 req/s | 40.70 req/s | 1.09–1.10× more | INCONCLUSIVE | [summary](results/audited-bf16/summary.json) |
+| Input tokens, three-question request | 154 | 154 | 116 | 24.68% fewer reported input tokens | n/a | [timings](results/audited-bf16/timings.json) |
+
+Not compared, because the repository has no matching record:
+
+- **Decode tokens/s.** Both servers answer with zero output tokens ([timings](results/audited-bf16/timings.json)),
+  so there is no decode phase. Prefill and time to first token are not recorded separately; the latency above
+  covers the whole decision request.
+- **Memory.** Only ours was measured: system memory rose by 8.94 GiB once loaded and by 16.69 GiB after the
+  text, image and 64-client workloads ([memory](results/audited-bf16/memory-summary.json)). These are snapshots
+  on shared unified memory, not peaks. No stock llama.cpp memory figure was recorded.
+- **Stock Q8_0 and Q4_K_M.** These were measured only against the earlier packed/quantized engine, which this
+  build replaced, in a separate session. Those [historical results](results/report.md) do not describe this build.
 
 The overall verdict is **INCONCLUSIVE**, not a performance certification: the two one-question control runs
 spread too far apart to call, and the burst's adverse bound reached 6.40%, past its tolerance. A better mean
 does not turn either gate into a pass. The summary also flags changed reported input-token exposure for the
 three-question state: 116 for TensorFold versus 154 for llama.cpp. Each run answered 2320 measured requests
-(2520 decisions) after 340 warmup requests, all complete.
+(2520 decisions) after 340 warmup requests, all complete. These timings precede packaging; the baked image
+passed integration checks, not a new performance comparison.
 
 Several questions on one state are where the recipe gains most: when the questions fit in one forward, the state
 is read once and each question branches off it, which is why TensorFold reports 116 input tokens for the
@@ -46,12 +59,8 @@ three-question request where llama.cpp reports 154.
 The packaged image's integration checks recorded repeated/concurrent response agreement and zero output tokens.
 The retained timing derivatives omit answer payloads; these checks do not establish held-out accuracy.
 
-System memory rose by 8.94 GiB once loaded and by 16.69 GiB after the text, image and 64-client workloads.
-These are snapshots on shared unified memory, not peaks.
-
 Evidence: [summary](results/audited-bf16/summary.json), [timings](results/audited-bf16/timings.json),
 [memory](results/audited-bf16/memory-summary.json), [provenance](results/audited-bf16/provenance.json).
-The [historical results](results/report.md) describe an earlier packed/quantized engine and do not apply here.
 
 ## Requirements
 
